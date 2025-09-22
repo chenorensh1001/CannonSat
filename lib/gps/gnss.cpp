@@ -9,18 +9,22 @@ namespace gnss {
     TinyGPSPlus gnss;
     HardwareSerial& GNSS = Serial2;
 
-    int setup_gnss() {
+    int setup() {
         GNSS.begin(GNSS_BAUD_RATE);
         return 0; 
     }
 
-    void read_gnss() {
+    void read() {
         while (GNSS.available() > 0) {
             gnss.encode(GNSS.read());
         }
         if (gnss.location.isUpdated() && gnss.location.isValid()) {
            //TODO: Handle updated location
         }
+    }
+
+    void end() {
+        GNSS.end();
     }
 
 }
