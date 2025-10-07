@@ -1,9 +1,9 @@
-#include "gnss.h"
-#include "config.h"
-
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <TinyGPS++.h>
+
+#include "gnss.h"
+#include "config.h"
 
 namespace gnss {
     TinyGPSPlus gnss;

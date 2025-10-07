@@ -1,10 +1,10 @@
-#include "imu.h"
-#include "config.h" 
-
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_ICM20X.h>
 #include <Adafruit_ICM20948.h>
+
+#include "imu.h"
+#include "config.h" 
 
 namespace imu {
     Adafruit_ICM20948 icm;

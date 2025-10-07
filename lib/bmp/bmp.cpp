@@ -1,8 +1,8 @@
-#include "bmp.h"
-#include "config.h"
-
 #include <Arduino.h>
 #include <Adafruit_BMP3XX.h>
+
+#include "bmp.h"
+#include "config.h"
 
 namespace bmp {
     Adafruit_BMP3XX bmp;
