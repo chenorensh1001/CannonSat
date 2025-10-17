@@ -9,7 +9,7 @@
 namespace imu {
     Adafruit_ICM20948 icm;
 
-    int setup_imu() {
+    int setup() {
         if(!icm.begin_I2C()) {
             Serial.println("Failed to find ICM20948");
             return 1; 
@@ -90,13 +90,24 @@ namespace imu {
         return 0; 
         }
 
-    void read_imu() {
-        sensors_event_t accel;
-        sensors_event_t gyro;
-        sensors_event_t mag;
-        sensors_event_t temp;
-        icm.getEvent(&accel, &gyro, &temp, &mag);
-        //TODO
+    void read(sensors_event_t &accel,
+          sensors_event_t &gyro,
+          sensors_event_t &mag,
+          sensors_event_t &temp) {
+    icm.getEvent(&accel, &gyro, &temp, &mag);
+    }   
+
+    void config( icm20948_accel_range_t accel_range,
+                icm20948_gyro_range_t gyro_range,
+                ak09916_data_rate_t mag_data_rate,
+                uint16_t accel_divisor,
+                uint8_t gyro_divisor
+                ) {
+        icm.setAccelRange(accel_range);
+        icm.setGyroRange(gyro_range);
+        icm.setMagDataRate(mag_data_rate);
+        icm.setAccelRateDivisor(accel_divisor);
+        icm.setGyroRateDivisor(gyro_divisor);
     }
 
 }

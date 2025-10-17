@@ -1,30 +1,37 @@
-#include <Arduino.h>
-#include <HardwareSerial.h>
-#include <TinyGPS++.h>
-
 #include "gnss.h"
 #include "config.h"
+#include <Arduino.h>
+#include <TinyGPS++.h>
 
 namespace gnss {
-    TinyGPSPlus gnss;
-    HardwareSerial& GNSS = Serial2;
 
-    int setup() {
-        GNSS.begin(GNSS_BAUD_RATE);
-        return 0; 
+static TinyGPSPlus gps;
+HardwareSerial& GNSS = Serial2;
+
+int setup() {
+    GNSS.begin(GNSS_BAUD_RATE);
+    return 0;
+}
+
+Location read() {
+    while (GNSS.available() > 0) {
+        gps.encode(GNSS.read());
     }
 
-    void read() {
-        while (GNSS.available() > 0) {
-            gnss.encode(GNSS.read());
-        }
-        if (gnss.location.isUpdated() && gnss.location.isValid()) {
-           //TODO: Handle updated location
-        }
+    Location loc;
+    if (gps.location.isUpdated() && gps.location.isValid()) {
+        loc.latitude  = gps.location.lat();
+        loc.longitude = gps.location.lng();
+        loc.altitude  = gps.altitude.meters();
+        loc.speed     = gps.speed.mps();
+        loc.course    = gps.course.deg();
+        loc.valid     = true;
     }
+    return loc;
+}
 
-    void end() {
-        GNSS.end();
-    }
+void end() {
+    GNSS.end();
+}
 
 }
