@@ -4,13 +4,13 @@
 #include <Adafruit_ICM20948.h>
 
 #include "imu.h"
-#include "config.h" 
+#include "config.h"
 
 namespace imu {
     Adafruit_ICM20948 icm;
 
     int setup() {
-        if(!icm.begin_I2C()) {
+        if(!icm.begin_I2C(IMU_I2C_ADDRESS, &Wire)) {
             Serial.println("Failed to find ICM20948");
             return 1; 
         }

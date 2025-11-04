@@ -1,5 +1,4 @@
 #include "bmp.h"
-#include "config.h"
 #include <Arduino.h>
 #include <Adafruit_BMP3XX.h>
 

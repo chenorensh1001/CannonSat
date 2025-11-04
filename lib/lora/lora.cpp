@@ -52,7 +52,7 @@ namespace lora {
         return packetReceivedFlag;
     }
 
-    bool send(const char* msg, size_t len, uint8_t retries = 3) {
+    bool send(const char* msg, size_t len, uint8_t retries) {
         if (len > MAX_MSG_LEN) return false;
 
         uint8_t buf[MAX_MSG_LEN];
