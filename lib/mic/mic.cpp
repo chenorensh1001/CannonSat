@@ -70,9 +70,6 @@ namespace mic {
         // connect I2S source to our MicStream so update() gets called
         patchCord = new AudioConnection(i2sMic, micStream);
 
-        // Start I2S input (Audio library handles hardware)
-        i2sMic.begin();
-
         return 0;
     }
 

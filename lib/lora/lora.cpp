@@ -6,11 +6,6 @@
 
 namespace lora {
     RH_RF95 rf95(RFM95_CS, RFM95_INT);
-    volatile bool packetReceivedFlag = false;
-
-    void onRadioInterrupt() {
-        packetReceivedFlag = true;
-    }
 
     int setup() {
         if(!rf95.init()) {
@@ -25,9 +20,6 @@ namespace lora {
         rf95.setCodingRate4(LORA_CODING_RATE);
         rf95.setSignalBandwidth(LORA_BANDWIDTH);
 
-        pinMode(RFM95_INT, INPUT);
-        attachInterrupt(digitalPinToInterrupt(RFM95_INT), onRadioInterrupt, FALLING);
-
         rf95.setModeRx();
         delay(2);
         Serial.println("RFM95W ready and listening...");
@@ -36,20 +28,18 @@ namespace lora {
     }
 
     void sleep() {
-        detachInterrupt(digitalPinToInterrupt(RFM95_INT));
         rf95.sleep();
         Serial.println("RFM95W sleeping...");
     }
     
     void wake() {
         rf95.setModeRx();
-        attachInterrupt(digitalPinToInterrupt(RFM95_INT), onRadioInterrupt, FALLING);
         delay(2);
         Serial.println("RFM95W awake, listening...");
     }
 
     bool packetAvailable() {
-        return packetReceivedFlag;
+        return rf95.available();
     }
 
     bool send(const char* msg, size_t len, uint8_t retries) {
@@ -70,12 +60,7 @@ namespace lora {
     }
 
     bool receive(char* outBuf, size_t& outLen) {
-        noInterrupts();
-        bool flag = packetReceivedFlag;
-        packetReceivedFlag = false;
-        interrupts();
-
-        if (!flag) return false;
+        if (!rf95.available()) return false;
 
         uint8_t buf[MAX_MSG_LEN];
         uint8_t len = sizeof(buf);
@@ -83,7 +68,7 @@ namespace lora {
         if (rf95.recv(buf, &len)) {
             if (len > outLen) len = outLen;
             memcpy(outBuf, buf, len);
-            outLen = len; 
+            outLen = len;
             return true;
         }
         return false;
