@@ -5,7 +5,7 @@
 #include "bmp.h"
 #include "gnss.h"
 #include "imu.h"
-#include "lora.h"
+#include "lora_driver.h"
 #include "mic.h"
 
 // put function declarations here:
@@ -16,21 +16,15 @@ void setup() {
   Serial.begin(9600);
   delay(2000); // Wait for Serial to initialize
   
-  lora::setup();
+  // Add your setup code here
+
   Serial.println("Setup complete.");
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
 
-  Serial.println("Sending LoRa message...");
-  const char* msg = "Hello, LoRa!";
-  size_t len = strlen(msg);
-  if (lora::send(msg, len)) {
-      Serial.println("Message sent successfully.");
-  } else {
-      Serial.println("Failed to send message.");
-  }
+  Serial.println("Looping...");
   
   delay(5000);
 }

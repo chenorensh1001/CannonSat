@@ -2,7 +2,7 @@
 #include <SPI.h>
 #include <LoRa.h>
 
-#include "lora.h"
+#include "lora_driver.h"
 #include "config.h"
 
 namespace lora {
