@@ -1,5 +1,6 @@
-#include "mic.h"
 #include <Audio.h>
+
+#include "mic.h"
 
 AudioInputI2S            i2sMic;      // I2S microphone input
 AudioConnection*         patchCord = nullptr;

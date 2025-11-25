@@ -1,6 +1,7 @@
-#include "bmp.h"
 #include <Arduino.h>
 #include <Adafruit_BMP3XX.h>
+
+#include "bmp.h"
 
 namespace bmp {
 

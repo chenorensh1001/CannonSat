@@ -1,11 +1,11 @@
 #pragma once
 #include <Arduino.h>
-#include <RH_RF95.h>
+#include <LoRa.h>
 
 namespace lora {
 
-    // Maximum message length
-    constexpr size_t MAX_MSG_LEN = RH_RF95_MAX_MESSAGE_LEN;
+    // Maximum message length - Arduino LoRa lib doesn't define this, so define as needed
+    constexpr size_t MAX_MSG_LEN = 255; // can be up to 255 bytes with Arduino LoRa lib
 
     /**
      * @brief Initialize the LoRa module
@@ -33,10 +33,9 @@ namespace lora {
      * @brief Send a message over LoRa
      * @param msg Pointer to the message buffer
      * @param len Length of the message in bytes
-     * @param retries Number of send attempts (default 3)
      * @return true if message was sent successfully
      */
-    bool send(const char* msg, size_t len, uint8_t retries = 3);
+    bool send(const char* msg, size_t len);
 
     /**
      * @brief Receive a message from LoRa

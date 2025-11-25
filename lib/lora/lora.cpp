@@ -1,76 +1,92 @@
 #include <Arduino.h>
-#include <RH_RF95.h>
+#include <SPI.h>
+#include <LoRa.h>
 
-#include <lora.h>
+#include "lora.h"
 #include "config.h"
 
 namespace lora {
-    RH_RF95 rf95(RFM95_CS, RFM95_INT);
-
+    namespace {
+        // Cache size of the most recent packet so parsePacket() is not called twice.
+        volatile int pendingPacketSize = 0;
+    }
+    
     int setup() {
-        if(!rf95.init()) {
-            Serial.println("Failed to find RFM95W");
-            return 1; 
+        LoRa.setPins(RFM95_CS, RFM95_RST, RFM95_INT);  // CS, RST, DIO0
+
+        if (!LoRa.begin(LORA_FREQ)) {
+            Serial.println("Failed to start LoRa");
+            return 1;
         }
-        Serial.println("RFM95W found!");
+        Serial.println("LoRa initialized");
 
-        rf95.setFrequency(LORA_FREQ);
-        rf95.setTxPower(LORA_TX_POWER);
-        rf95.setSpreadingFactor(LORA_SPREADING_FACTOR);
-        rf95.setCodingRate4(LORA_CODING_RATE);
-        rf95.setSignalBandwidth(LORA_BANDWIDTH);
+        LoRa.setTxPower(LORA_TX_POWER);
+        LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
+        LoRa.setSignalBandwidth(LORA_BANDWIDTH);
+        LoRa.setCodingRate4(LORA_CODING_RATE);
 
-        rf95.setModeRx();
-        delay(2);
-        Serial.println("RFM95W ready and listening...");
+        Serial.println("LoRa ready and listening...");
 
         return 0;
     }
 
     void sleep() {
-        rf95.sleep();
-        Serial.println("RFM95W sleeping...");
+        LoRa.sleep();
+        Serial.println("LoRa sleeping...");
     }
-    
+
     void wake() {
-        rf95.setModeRx();
-        delay(2);
-        Serial.println("RFM95W awake, listening...");
+        LoRa.receive();
+        Serial.println("LoRa awake, listening...");
     }
 
     bool packetAvailable() {
-        return rf95.available();
+        if (pendingPacketSize > 0) return true;
+
+        // LoRa.parsePacket() returns packet size if available, 0 otherwise
+        int size = LoRa.parsePacket();
+        if (size > 0) {
+            pendingPacketSize = size;
+            return true;
+        }
+        return false;
     }
 
-    bool send(const char* msg, size_t len, uint8_t retries) {
+    bool send(const char* msg, size_t len) {
         if (len > MAX_MSG_LEN) return false;
 
-        uint8_t buf[MAX_MSG_LEN];
-        memcpy(buf, msg, len);
-
-        for (uint8_t attempt = 0; attempt < retries; ++attempt) {
-            rf95.send(buf, len);
-            if (rf95.waitPacketSent(2000)) { // 2s timeout
-                rf95.setModeRx();
-                return true;
-            }
+        LoRa.beginPacket();
+        LoRa.write((const uint8_t*)msg, len);
+        int err = LoRa.endPacket(true);  // async
+        if (err == 1) { // success
+            LoRa.receive(); // switch to receive
+            return true;
         }
-        rf95.setModeRx();
+
+        LoRa.receive();
         return false;
     }
 
     bool receive(char* outBuf, size_t& outLen) {
-        if (!rf95.available()) return false;
-
-        uint8_t buf[MAX_MSG_LEN];
-        uint8_t len = sizeof(buf);
-
-        if (rf95.recv(buf, &len)) {
-            if (len > outLen) len = outLen;
-            memcpy(outBuf, buf, len);
-            outLen = len;
-            return true;
+        int packetSize = pendingPacketSize;
+        if (packetSize == 0) {
+            packetSize = LoRa.parsePacket();
         }
-        return false;
+        if (packetSize == 0) return false;
+
+        if ((size_t)packetSize > outLen) {
+            // If incoming packet is larger than buffer, truncate
+            packetSize = outLen;
+        }
+
+        for (int i = 0; i < packetSize; i++) {
+            int byteReceived = LoRa.read();
+            if (byteReceived == -1) break;
+            outBuf[i] = (char)byteReceived;
+        }
+
+        outLen = packetSize;
+        pendingPacketSize = 0;
+        return true;
     }
 }

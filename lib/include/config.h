@@ -11,11 +11,10 @@
 #define RFM95_CS 10
 #define RFM95_INT 14
 #define RFM95_RST 15
-#define LORA_FREQ 868.0 // MHz
+#define LORA_FREQ 868.3 // MHz
 #define LORA_TX_POWER 14 // dBm
-#define LORA_SPREADING_FACTOR 11
-#define LORA_CODING_RATE 5 // 4/5
-#define LORA_BANDWIDTH 125E3 // Hz
-
+#define LORA_SPREADING_FACTOR 8 // 7-12
+#define LORA_CODING_RATE 6 // 4/6
+#define LORA_BANDWIDTH 250E3 // Hz
 
 #endif
