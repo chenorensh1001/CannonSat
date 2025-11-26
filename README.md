@@ -16,7 +16,7 @@ Firmware workspace for the ETH Zürich Space Systems Engineering core course (Ve
 10. [Course Policies & Attribution](#course-policies--attribution)
 
 ## Project Overview
-- **Objective:** Provide a reusable firmware baseline for payload avionics used in the Venus Probe project of Space Systems Engineering Core Course 1.
+- **Objective:** Provide a reusable firmware baseline for Venus Probe payload avionics used in the Venus Probe project of Space Systems Engineering Core Course 1.
 - **Architecture:** Single MCU (Teensy 4.1) orchestrating instrument drivers (GNSS, IMU, pressure, microphone, LoRa radio, SD logging).
 - **Framework:** PlatformIO + Arduino core for Teensy. Code is modularized into `lib/<subsystem>` directories with explicit namespaces (e.g., `gnss::read`).
 - **Design Goals:** Deterministic sensor polling, robust data logging, and clear separation between hardware abstraction and mission logic.
@@ -48,8 +48,7 @@ Firmware workspace for the ETH Zürich Space Systems Engineering core course (Ve
 | Core | `framework-arduinoteensy` | Teensyduino runtime (Serial, Wire, SPI, Audio). |
 | GNSS | `TinyGPS++` | NMEA parsing and fix extraction. |
 | IMU | `Adafruit_ICM20X` / `Adafruit_ICM20948` | Sensor fusion driver for ICM‑20948. |
-| LoRa (RadioHead) | `RadioHead RH_RF95` | Packet radio with headers/ACKs (see `lib/lora`). |
-| LoRa (Raw) | `sandeepmistry/LoRa` | Headerless LoRa frames (`lib/lora/lora_raw.cpp`). |
+| LoRa | `sandeepmistry/LoRa` | SPI-based radio driver for Semtech SX1276 (RFM95) modules. |
 | Audio/Mic | `Teensy Audio` | Streams microphone blocks into a circular buffer. |
 | Storage | `SD.h` | SDIO filesystem for logging. |
 
@@ -82,12 +81,11 @@ pio device monitor --baud 115200
 - For multiple environments (e.g., RadioHead vs raw LoRa), define profiles in `platformio.ini` and build with `pio run -e <env>`.
 
 ## Subsystem Notes
-### LoRa (`lib/lora` and `lib/lora/lora_raw.cpp`)
-- `lora::setup()` configures pins, frequency, bandwidth, spreading factor, coding rate, TX power.
-- RadioHead version adds 4-byte headers (TO, FROM, ID, FLAGS). Default payload limit is 251 bytes (`MAX_MSG_LEN`).
-- Raw driver (`LoRa` lib) omits software headers; ensure both ends share modulation parameters.
-- `lora::send` currently performs immediate retries via `yield()` (non-blocking). Higher layers may implement their own retry/backoff strategy.
-- Use `rf95.setHeaderTo()` etc. if you need node addressing.
+### LoRa (`lib/lora`)
+- `lora::setup()` configures pins, frequency, bandwidth, spreading factor, coding rate, and TX power through the Arduino LoRa driver.
+- Packets are transmitted without RadioHead software headers; the full payload budget (≤255 bytes) is available for mission data.
+- `lora::send` currently performs immediate retries via `yield()` (non-blocking). Higher layers may implement their own retry/backoff strategy if acknowledgements are required.
+- Because no built-in addressing exists, include destination/source bytes inside your payload if you need routing logic.
 
 ### GNSS (`lib/gps`)
 - Uses `TinyGPS++` to parse Serial2 stream.
@@ -114,7 +112,7 @@ pio device monitor --baud 115200
 - Wraps pressure/temperature sensor for altitude estimation. Calibrate offsets before flights.
 
 ## Data Handling & Logging
-- **Telemetry:** Use LoRa (RadioHead for addressed packets or raw LoRa for simple payloads). Keep payloads ≤251 bytes and include checksums if you bypass RadioHead.
+- **Telemetry:** Use the LoRa module (Arduino LoRa driver). Keep payloads ≤255 bytes and embed any addressing/checksum bytes you require at the application layer.
 - **Onboard Storage:** Stream CSV/JSON lines via `sd::writeLine`. Suggested directory structure: `/logs/<date>/sensor_x.txt`.
 - **Timestamps:** Teensy `millis()` is used by default. If GPS lock is available, propagate GPS time into log headers.
 
