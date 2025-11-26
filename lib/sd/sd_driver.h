@@ -1,5 +1,5 @@
 /**
- * @file sd.h
+ * @file sd_driver.h
  * @brief Simple SD logging utility built on Arduino SD.h for Teensy 4.1.
  *
  * @details

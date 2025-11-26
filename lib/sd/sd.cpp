@@ -2,7 +2,7 @@
 #include <SD.h>
 #include <string.h>
 
-#include "sd.h"
+#include "sd_driver.h"
 #include "config.h"
 
 #ifndef SD_CS_PIN

@@ -7,6 +7,7 @@
 #include "imu.h"
 #include "lora_driver.h"
 #include "mic.h"
+#include "sd_driver.h"
 
 // put function declarations here:
 int myFunction(int, int);
