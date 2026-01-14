@@ -39,6 +39,13 @@ int setup();
  * 
  * @return Location struct with current valid data, or valid = false if no new fix
  */
+void update();        // <-- ⭐ ADD THIS ⭐
+
+/**
+ * @brief Return the latest parsed GNSS location
+ */
+
+
 Location read();
 
 /**

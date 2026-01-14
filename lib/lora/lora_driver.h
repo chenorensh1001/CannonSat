@@ -4,53 +4,33 @@
 #include <sample.h>
 #include <gnss.h>
 
-
 namespace lora {
 
-    // Maximum message length - Arduino LoRa lib doesn't define this, so define as needed
-    constexpr size_t MAX_MSG_LEN = 255; // can be up to 255 bytes with Arduino LoRa lib
+    constexpr size_t MAX_MSG_LEN = 255;
 
-    /**
-     * @brief Initialize the LoRa module
-     * @return 0 on success, 1 on failure
-     */
     int setup();
-
-    /**
-     * @brief Put the LoRa module into sleep mode
-     */
     void sleep();
-
-    /**
-     * @brief Wake the LoRa module from sleep mode
-     */
     void wake();
-
-    /**
-     * @brief Check if a new packet has been received
-     * @return true if a packet is available
-     */
     bool packetAvailable();
-
-    /**
-     * @brief Send a message over LoRa
-     * @param msg Pointer to the message buffer
-     * @param len Length of the message in bytes
-     * @return true if message was sent successfully
-     */
     bool send(const char* msg, size_t len);
-
-    /**
-     * @brief Receive a message from LoRa
-     * 
-     * @param outBuf Pointer to a pre-allocated buffer where the received data will be stored
-     * @param outLen On input: size of the buffer (in bytes); on output: actual length of the received message
-     * @return true if a message was successfully received, false otherwise
-     */
-    //bool receive(char* outBuf, size_t& outLen);
     bool commandReceived();
-    bool sendTelemetry(const gnss::Location& loc);
+
+    // Build + send telemetry packet (GNSS + BMP altitude)
+    bool sendTelemetry(const gnss::Location& loc, float bmpAltitude);
+
+    // Build + send science packet
     bool sendScience(const Sample& s);
 
+    // Debug: print raw telemetry values
+    void debugTelemetry(const gnss::Location& loc, float bmpAltitude);
+
+    // Debug: print packed bytes
+    void debugPrintPacket(uint8_t* packet, size_t len);
+
+    // Debug: print raw GNSS/BMP values (if separate)
+    void debugPrintTelemetry(const gnss::Location& loc, float bmpAltitude);
+
+    // Internal helper: build telemetry packet without sending
+    void buildTelemetryPacket(uint8_t* packet, const gnss::Location& loc, float bmpAltitude);
 
 }

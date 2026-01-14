@@ -3,6 +3,8 @@
 
 /* --- GNSS Configuration --- */
 #define GNSS_BAUD_RATE 9600
+#define PM_SENSOR_BAUD_RATE 9600
+
 
 /* --- IMU Configuration --- */
 #define IMU_I2C_ADDRESS 0x68

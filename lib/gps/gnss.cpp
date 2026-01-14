@@ -57,6 +57,11 @@ Location read() {
     return loc;
 }
 
+void update() {
+    while (GNSS.available() > 0) {
+        gps.encode(GNSS.read());
+    }
+}
 
 
 void end() {
