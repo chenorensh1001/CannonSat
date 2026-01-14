@@ -16,5 +16,8 @@
 #define LORA_SPREADING_FACTOR 8 // 7-12
 #define LORA_CODING_RATE 6 // 4/6
 #define LORA_BANDWIDTH 250E3 // Hz
+#define PIN_LED_ACTIVE     255
+#define PIN_LED_DESCENT    255
+#define PIN_LED_TOUCHDOWN  255
 
 #endif

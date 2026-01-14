@@ -1,4 +1,6 @@
 #pragma once
+#include <TinyGPS++.h>
+
 
 namespace gnss {
 
@@ -6,13 +8,18 @@ namespace gnss {
  * @brief GPS location data structure
  */
 struct Location {
-    double latitude  = 0.0;   /* Latitude in degrees */
-    double longitude = 0.0;   /* Longitude in degrees */
-    double altitude  = 0.0;   /* Altitude in meters */
-    double speed     = 0.0;   /* Speed in meters per second */
-    double course    = 0.0;   /* Course over ground in degrees */
-    bool valid       = false; /* True if location fix is valid */
+    double latitude;
+    double longitude;
+    double altitude;          // meters
+    double speed;             // m/s (horizontal)
+    double course;            // degrees
+    bool   valid;
+    uint32_t timestamp;       // Unix seconds (with fallback)
+    float verticalVelocity;   // m/s (GNSS or IMU fallback)
 };
+
+uint32_t convertToUnix(TinyGPSDate& d, TinyGPSTime& t);
+
 
 /**
  * @brief Initialize the GNSS module

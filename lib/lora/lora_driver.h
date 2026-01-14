@@ -1,6 +1,9 @@
 #pragma once
 #include <Arduino.h>
 #include <LoRa.h>
+#include <sample.h>
+#include <gnss.h>
+
 
 namespace lora {
 
@@ -44,6 +47,10 @@ namespace lora {
      * @param outLen On input: size of the buffer (in bytes); on output: actual length of the received message
      * @return true if a message was successfully received, false otherwise
      */
-    bool receive(char* outBuf, size_t& outLen);
+    //bool receive(char* outBuf, size_t& outLen);
+    bool commandReceived();
+    bool sendTelemetry(const gnss::Location& loc);
+    bool sendScience(const Sample& s);
+
 
 }
