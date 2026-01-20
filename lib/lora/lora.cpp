@@ -261,12 +261,32 @@ namespace lora {
 
     // Bitmap
     packet[5] = 0x0B;
+    
+    //Detontaion Events
+    DetonationEvent ev[4];
+    uint8_t nEv = getDetonationEvents(ev);
+
+    for (uint8_t i = 0; i < nEv && i < 4; i++) {
+        uint8_t base = 6 + i * 5;
+        packet[base + 0] = (uint8_t)ev[i].eventTime; // 1 byte per spec
+        packet[base + 1] = ev[i].peak;
+        packet[base + 2] = ev[i].rms;
+        packUInt16(ev[i].duration, &packet[base + 3]); // big-endian (your packUInt16)
+    }
+
 
     // Retrieve 3 BMP samples: 0s, 7s, 14s ago
     BmpSample s0, s7, s14;
     getSampleSecondsAgo(0,  s0);
     getSampleSecondsAgo(7,  s7);
     getSampleSecondsAgo(14, s14);
+
+    // Fallbacks if history not ready yet
+    if (!ok0)  { s0.timestampMs = millis(); s0.temperature = s.temperature; s0.pressure = s.pressure; s0.altitude = s.altitude; s0.verticalVelocity = 0; }
+    if (!ok7)  s7  = s0;
+    if (!ok14) s14 = s0;
+
+    BmpSample samples[3] = { s0, s7, s14 };
 
     // Secondary payload block (bytes 26–40)
     uint8_t* sec = &packet[26];

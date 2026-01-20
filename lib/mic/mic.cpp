@@ -139,4 +139,19 @@ namespace mic {
         sampleCount = 0;
         interrupts();
     }
+
+    void stop() {
+    // Disconnect the audio pipeline
+    if (patchCord) {
+        delete patchCord;
+        patchCord = nullptr;
+    }
+
+    // Optionally clear buffer pointers/state (keeps memory allocated)
+    noInterrupts();
+    writeIndex = 0;
+    readIndex = 0;
+    sampleCount = 0;
+    interrupts();
+}
 }

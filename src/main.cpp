@@ -12,6 +12,9 @@
 #include "pm.h"
 #include "interface.h"
 #include "linear_actuator.h"
+#include "mic.h"    
+#include <stdint.h>
+
 
 // Path to SD log file
 const char* SD_LOG_PATH = "/logs/descent.txt";
@@ -70,8 +73,16 @@ constexpr int BMP_HISTORY_SIZE = 200; // 20 seconds at 10 Hz
 BmpSample bmpHistory[BMP_HISTORY_SIZE];
 int bmpHistoryIndex = 0;
 
+//Detonation event structure definition
+struct DetonationEvent {
+    uint16_t eventTime;   // seconds since ACTIVE start
+    uint8_t  peak;
+    uint8_t  rms;
+    uint16_t duration;    // ms
+};
 
 //HELPER FUNCTIONS
+
     //TIMESTAMPING//
 uint32_t getUnifiedTimestamp(uint32_t gnssTimestamp) {
     static bool gnssEverValid = false;
@@ -212,7 +223,6 @@ void dumpSdFile(const char* filename) {
 
 // MICROPHONE EVENT PROCESSING //
 void processSoundEvents() {
-    // --- Event Detection Variables ---
     static bool isEventActive = false;
     static uint32_t eventStartTime = 0;
     static uint32_t lastLoudSampleTime = 0;
@@ -220,73 +230,113 @@ void processSoundEvents() {
     static double sumSquares = 0;
     static uint32_t sampleCount = 0;
 
-    // --- Continuous 2kHz Downsampling Variables ---
+    // Continuous 2kHz Downsampling
     static uint8_t downsampleCounter = 0;
-    const uint8_t DOWNSAMPLE_FACTOR = 22; // 44100 / 22 = ~2004 Hz
-    
-    const int SOUND_THRESHOLD = 362; // Adapt to sound threshold desired
-    const uint32_t COOLDOWN_MS = 50; 
+    const uint8_t DOWNSAMPLE_FACTOR = 22;
+
+    // Debug timing
+    static uint32_t lastDebugPrint = 0;
+
+    // Tunables
+    const int SOUND_THRESHOLD = 150; //362 before
+    const uint32_t COOLDOWN_MS = 50;
+
     int16_t tempBuffer[128];
 
-    // Process all samples waiting in the I2S ring buffer
+    // --- OPEN RAW FILE ONCE PER CALL (NOT INSIDE THE LOOP) ---
+    File rawFile = SD.open("/logs/mic_2khz.bin", FILE_WRITE);
+
+    // Read all available samples
     while (mic::availableSamples() > 0) {
         size_t readCount = mic::readBuffer(tempBuffer, 128);
         uint32_t now = millis();
 
-        // Open the continuous log for this block of samples
-        // We use binary mode for speed and space efficiency at 2kHz
-        File rawFile = SD.open("/logs/mic_2khz.bin", FILE_WRITE);
-
         for (size_t i = 0; i < readCount; i++) {
             int16_t sample = tempBuffer[i];
-            uint16_t absVal = abs(sample);
+            uint16_t absVal = (uint16_t)abs(sample);
 
-            // 1. CONTINUOUS 2kHz LOGGING (Decimation)
-            // Take every 22nd sample from the 44.1kHz stream
+            // 1) RAW 2kHz LOGGING (downsample from 44.1kHz -> ~2kHz)
             downsampleCounter++;
             if (downsampleCounter >= DOWNSAMPLE_FACTOR) {
-                if (rawFile) {
-                    rawFile.write((const uint8_t*)&sample, sizeof(int16_t));
-                }
+                if (rawFile) rawFile.write((const uint8_t*)&sample, sizeof(int16_t));
                 downsampleCounter = 0;
             }
 
-            // 2. LOUD EVENT DETECTION 
+            // 2) PEAK TRACKING (for debug + event metadata)
+            if ((int16_t)absVal > eventMaxPeak) eventMaxPeak = (int16_t)absVal;
+
+            // 3) LOUD EVENT DETECTION
             if (absVal > SOUND_THRESHOLD) {
                 lastLoudSampleTime = now;
+
                 if (!isEventActive) {
                     isEventActive = true;
                     eventStartTime = now;
-                    eventMaxPeak = 0;
-                    sumSquares = 0;
+                    sumSquares = 0.0;
                     sampleCount = 0;
                 }
-                if (absVal > eventMaxPeak) eventMaxPeak = absVal;
-                sumSquares += (double)sample * sample;
+
+                sumSquares += (double)sample * (double)sample;
                 sampleCount++;
             }
         }
-        
-        // Close raw file after processing this 128-sample block
-        if (rawFile) rawFile.close();
     }
 
-    // 3. LOG SUMMARY EVENT (If a loud event just finished)
-    if (isEventActive && (millis() - lastLoudSampleTime > COOLDOWN_MS)) {
+    // Close the raw file once (optional: you can keep it open globally instead)
+    if (rawFile) rawFile.close();
+
+    // --- DEBUG OUTPUT (Every 100ms) ---
+    uint32_t now = millis();
+    // if (now - lastDebugPrint >= 100) {
+    //     // Heartbeat so you KNOW the function runs in DESCENT
+    //     Serial.print("[MIC] peak=");
+    //     Serial.print(eventMaxPeak);
+
+    //     if (eventMaxPeak > 0) {
+    //         float dbfs = 20.0f * log10f((float)eventMaxPeak / 32767.0f);
+    //         float dbSPL = dbfs + 120.0f;
+
+    //         Serial.print("\tSPL=");
+    //         Serial.print(dbSPL, 1);
+    //         Serial.print(" dB\t[");
+
+    //         for (int i = 0; i < (eventMaxPeak / 2000); i++) Serial.print("=");
+    //         Serial.println("]");
+    //     } else {
+    //         Serial.println();
+    //     }
+
+    //     lastDebugPrint = now;
+
+    //     // If not in an active loud event, reset peak for the next 100ms window
+    //     if (!isEventActive) eventMaxPeak = 0;
+    // }
+
+    // 4) LOG SUMMARY EVENT TO SD (after cooldown)
+    if (isEventActive && (now - lastLoudSampleTime > COOLDOWN_MS)) {
+        // Guard against divide-by-zero
+        if (sampleCount == 0) {
+            isEventActive = false;
+            eventMaxPeak = 0;
+            return;
+        }
+
         DetonationEvent e;
-        // eventTime is seconds since the descent started
         e.eventTime = (uint16_t)((eventStartTime - activeStartMs) / 1000);
-        e.peak      = (uint8_t)(eventMaxPeak / 128); 
-        e.rms       = (uint8_t)(sqrt(sumSquares / sampleCount) / 128); 
+        e.peak      = (uint8_t)(eventMaxPeak / 128);
+        e.rms       = (uint8_t)(sqrt(sumSquares / (double)sampleCount) / 128);
         e.duration  = (uint16_t)(lastLoudSampleTime - eventStartTime);
 
         File f = SD.open(SD_MIC_PATH, FILE_WRITE);
         if (f) {
             f.printf("%u,%u,%u,%u\n", e.eventTime, e.peak, e.rms, e.duration);
             f.close();
-            Serial.printf("[MIC] EVENT DETECTED: Time=%us, Peak=%u\n", e.eventTime, e.peak);
         }
+
+        Serial.println("!!! LOUD EVENT SAVED !!!");
+
         isEventActive = false;
+        eventMaxPeak = 0;
     }
 }
 
@@ -394,7 +444,7 @@ void setup() {
     pm::setup();              // same
     actuator::setup();
     actuator::undeploy();
-    mic:setup(16384)
+    mic::setup(16384);
 
     if (!ok) {
         // ERROR: at least one setup failed -> blink forever
@@ -415,9 +465,6 @@ void handleActive() {
     static bool armedLatched = false;   // prevents re-arming logic from running again
 
     unsigned long now = millis();
-
-    // Always update interface (debounce + any LED service you might have)
-    interface::update();
     mic::discardBuffer();
 
     // If ARM button pressed -> go ARMED and turn on yellow LED
@@ -571,29 +618,37 @@ void handleArmed() {
 }
 //DESCENT//
 void handleDescent() {
-    static uint32_t lastHzTick = 0;
-    static uint32_t lastPrint  = 0;
+    static uint32_t lastHzTick  = 0;
+    static uint32_t lastPrint   = 0;
+
+    // PM sampling timer + last valid reading cache
     static uint32_t lastPmRead = 0;
     static pm::Reading lastPmReading;
 
     uint32_t now = millis();
 
-    // Time since entering DESCENT
+    // Time since entering DESCENT (used to enable touchdown detection)
     bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
 
+    // HIGH-FREQUENCY POLLING (runs every loop)
     gnss::update();
     pm::update();
+    processSoundEvents();  // 2 kHz .bin logging + event detection
 
+    // 1 Hz block
     if (now - lastHzTick >= 1000) {
         lastHzTick = now;
 
+        // Read sensors at 1 Hz
         bmp::Reading b = bmp::read();
         sensors_event_t accel, gyro, mag, temp;
         imu::read(accel, gyro, mag, temp);
 
+        // PM SENSOR (2-second sampling)
         bool pmReady = false;
         if (now - lastPmRead >= 2000) {
             lastPmRead = now;
+
             pm::Reading pmr = pm::read();
             if (pmr.valid) {
                 lastPmReading = pmr;
@@ -608,11 +663,14 @@ void handleDescent() {
             return;
         }
 
+        // Store BMP history (1 Hz)
         bmpHistory[bmpHistoryIndex] = { now, b.temperature, b.pressure, b.altitude };
         bmpHistoryIndex = (bmpHistoryIndex + 1) % BMP_HISTORY_SIZE;
 
+        // GNSS used at 1 Hz (parsing is continuous above)
         gnss::Location loc = getEnrichedLocation(b.altitude);
 
+        // Build sample (1 Hz)
         Sample s;
         s.timestampMs = loc.timestamp;
         s.temperature = b.temperature;
@@ -629,15 +687,19 @@ void handleDescent() {
 
         flash_storeSample(s);
 
-        // Touchdown detection only after minimum descent time
+        // Touchdown detection (only after minimum descent time)
         if (descentTimeOk && detectTouchdown(b.altitude)) {
             Serial.println("[DESCENT] TOUCHDOWN detected");
+
+            // Finalize microphone logging
+            mic::stop();
+
             status = Status::TOUCHDOWN;
             return;
         }
 
-        // LoRa / SD flush handling (unchanged)
-        bool command = false;
+        // LoRa / SD flush handling (1 Hz)
+        bool command = false;  // indoor test
         if (command) {
             lastCommandMs = now;
             lora::sendScience(s);
@@ -650,6 +712,7 @@ void handleDescent() {
         }
     }
 
+    // 1 Hz debug print (rich version + simple tick)
     if (now - lastPrint >= 1000) {
         lastPrint = now;
         Serial.print("[DESCENT] tick | dt=");
@@ -658,6 +721,7 @@ void handleDescent() {
         Serial.println(descentTimeOk ? "YES" : "NO");
     }
 }
+
 
 //TOUCHDOWN//
 void handleTouchdown() {

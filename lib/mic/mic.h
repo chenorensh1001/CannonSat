@@ -40,5 +40,6 @@ namespace mic {
      * Use when you decide you no longer need the buffered audio (e.g. reset).
      */
     void discardBuffer();
+    void stop();
 
 }
