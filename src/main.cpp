@@ -75,11 +75,13 @@ int bmpHistoryIndex = 0;
 
 //Detonation event structure definition
 struct DetonationEvent {
-    uint16_t eventTime;   // seconds since ACTIVE start
+    uint8_t eventTime;   // seconds since ACTIVE start
     uint8_t  peak;
     uint8_t  rms;
     uint16_t duration;    // ms
 };
+static volatile uint8_t detEventCount = 0;
+static DetonationEvent detEvents[4]; // store last 4 sound events in struct detEvents, when communication window communicate those
 
 //HELPER FUNCTIONS
 
@@ -222,6 +224,21 @@ void dumpSdFile(const char* filename) {
 }
 
 // MICROPHONE EVENT PROCESSING //
+// Pushing the detonation events to the detEvents struct which keeps last 4 events
+void pushDetonationEvent(const DetonationEvent& e) {
+    noInterrupts();
+    if (detEventCount < 4) {
+        detEvents[detEventCount++] = e;
+    } else {
+        detEvents[0] = detEvents[1];
+        detEvents[1] = detEvents[2];
+        detEvents[2] = detEvents[3];
+        detEvents[3] = e;
+    }
+    interrupts();
+}
+
+// Main event processing function
 void processSoundEvents() {
     static bool isEventActive = false;
     static uint32_t eventStartTime = 0;
@@ -322,7 +339,7 @@ void processSoundEvents() {
         }
 
         DetonationEvent e;
-        e.eventTime = (uint16_t)((eventStartTime - activeStartMs) / 1000);
+        e.eventTime = (uint8_t)((eventStartTime - activeStartMs) / 1000);
         e.peak      = (uint8_t)(eventMaxPeak / 128);
         e.rms       = (uint8_t)(sqrt(sumSquares / (double)sampleCount) / 128);
         e.duration  = (uint16_t)(lastLoudSampleTime - eventStartTime);
@@ -337,7 +354,18 @@ void processSoundEvents() {
 
         isEventActive = false;
         eventMaxPeak = 0;
+        pushDetonationEvent(e);
+
     }
+}
+
+// Lora calls this function to get last 4 detonation events recorded in communication window 
+uint8_t getDetonationEvents(DetonationEvent out[4]) {
+    noInterrupts();
+    uint8_t n = detEventCount;
+    for (uint8_t i = 0; i < n; i++) out[i] = detEvents[i];
+    interrupts();
+    return n;
 }
 
 

@@ -5,11 +5,20 @@
 #include <gnss.h>
 #include "lora_driver.h"
 #include "config.h"
+#include <stdint.h>
+#include "detonation_event.h"
+
+struct DetonationEvent {
+    uint8_t  eventTime;   // seconds since ACTIVE start (1 byte per packet spec)
+    uint8_t  peak;
+    uint8_t  rms;
+    uint16_t duration;    // ms
+};
 
 // Forward declaration for function implemented in main.cpp
 // This is the function that retrieves BMP samples N seconds ago.
 bool getSampleSecondsAgo(float secondsAgo, BmpSample& out);
-
+uint8_t getDetonationEvents(DetonationEvent out[4]);
 
 namespace {
 
@@ -274,30 +283,33 @@ namespace lora {
         packUInt16(ev[i].duration, &packet[base + 3]); // big-endian (your packUInt16)
     }
 
-
+    // Secondary payload block (bytes 26–40): 3 samples × 7 bytes
     // Retrieve 3 BMP samples: 0s, 7s, 14s ago
-    BmpSample s0, s7, s14;
-    getSampleSecondsAgo(0,  s0);
-    getSampleSecondsAgo(7,  s7);
-    getSampleSecondsAgo(14, s14);
+    BmpSample s0{}, s7{}, s14{};
+    bool ok0  = getSampleSecondsAgo(0,  s0);
+    bool ok7  = getSampleSecondsAgo(7,  s7);
+    bool ok14 = getSampleSecondsAgo(14, s14);
 
     // Fallbacks if history not ready yet
     if (!ok0)  { s0.timestampMs = millis(); s0.temperature = s.temperature; s0.pressure = s.pressure; s0.altitude = s.altitude; s0.verticalVelocity = 0; }
     if (!ok7)  s7  = s0;
     if (!ok14) s14 = s0;
 
-    BmpSample samples[3] = { s0, s7, s14 };
+BmpSample samples[3] = { s0, s7, s14 };
 
-    // Secondary payload block (bytes 26–40)
-    uint8_t* sec = &packet[26];
+    BmpSample samples[3] = { s0, s7, s14 };
 
     auto encodeTemp = [](float tC) -> uint8_t {
         return (uint8_t)((tC + 25.0f) * 2.0f);   // 0.5°C resolution, compatible with -25 until 25 celsius, 
     };
 
     auto encodePressure = [](float pPa) -> int16_t {
-        return (int16_t)((pPa - 101325.0f) / 50.0f);  // 50 Pa resolution
-    };
+        float x = (pPa - 101325.0f) / 50.0f;
+        if (x < -32768.0f) x = -32768.0f;
+        if (x >  32767.0f) x =  32767.0f;
+        return (int16_t)x;
+    };         // Spec: Pressure 2 bytes. Your encoding: (p-101325)/50 in Pa.
+        // Clamp to int16 range.
 
     auto encodePM10 = [](float pm) -> uint16_t {
     if (pm < 0) return 0;
@@ -318,21 +330,25 @@ namespace lora {
 
     BmpSample samples[3] = { s0, s7, s14 };
 
+    // Each sample: PM2.5(2) + PM10(2) + Pressure(2) + Temp(1)
     for (int i = 0; i < 3; i++) {
-        int offset = i * 5;   // 5 bytes per sample
+    uint8_t base = 26 + i * 7;
 
-        // PM2.5 (2 bytes)
-        uint16_t pm25 = encodePM25(pm25_samples[i]);
-        packUInt16(pm25, &sec[offset + 0]);
+    // PM2.5 and PM10 (use latest PM reading for all 3 timestamps, as you do now)
+    uint16_t pm25 = encodePM25(s.pm2_5);
+    uint16_t pm10 = encodePM10(s.pm10_0);
 
-        // PM10 (2 bytes)
-        uint16_t pm10 = encodePM10(pm10_samples[i]);
-        packUInt16(pm10, &sec[offset + 2]);
+    packUInt16(pm25, &packet[base + 0]);   // 26–27, 33–34, 40–41
+    packUInt16(pm10, &packet[base + 2]);   // 28–29, 35–36, 42–43
 
-        // Temperature (1 byte)
-        sec[offset + 4] = encodeTemp(samples[i].temperature);
+    // Pressure from BMP history sample (0s/7s/14s)
+    int16_t pEnc = encodePressure(samples[i].pressure);
+    packInt16(pEnc, &packet[base + 4]);    // 30–31, 37–38, 44–45
 
+    // Temperature from BMP history sample
+    packet[base + 6] = encodeTemp(samples[i].temperature); // 32, 39, 46
     }
+
 
 
     // ------------------------------------------------------
