@@ -14,11 +14,21 @@
 #include "linear_actuator.h"
 #include "mic.h"    
 #include <stdint.h>
+#include <TinyGPS++.h>
 
 
 // Path to SD log file
 const char* SD_LOG_PATH = "/logs/descent.txt";
 const char* SD_MIC_PATH = "/logs/acoustic.txt";
+//SD file config
+static File micRawFile;
+static File micEventFile;
+
+void micLogOpen() {
+  micRawFile   = SD.open("/logs/mic_2khz.bin", FILE_WRITE);
+  micEventFile = SD.open("/logs/acoustic.txt", FILE_WRITE);
+}
+
 
 // RAM buffer for samples
 constexpr int SAMPLE_BUFFER_SIZE = 512;
@@ -84,8 +94,28 @@ static volatile uint8_t detEventCount = 0;
 static DetonationEvent detEvents[4]; // store last 4 sound events in struct detEvents, when communication window communicate those
 
 //HELPER FUNCTIONS
+
+// FUNCTION TO GET SAMPLES N SECONDS AGO (used by lora.cpp science packet)
+bool getSampleSecondsAgo(float secondsAgo, BmpSample& out) {
+    uint32_t targetTime = millis() - (uint32_t)(secondsAgo * 1000.0f);
+
+    for (int i = 0; i < BMP_HISTORY_SIZE; i++) {
+        int idx = (bmpHistoryIndex - 1 - i + BMP_HISTORY_SIZE) % BMP_HISTORY_SIZE;
+
+        if (bmpHistory[idx].timestampMs <= targetTime) {
+            out = bmpHistory[idx];
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool commandReceived = false;
 static uint8_t lastCmdByte = 0;
+
+static inline float vec3_mag(float x, float y, float z) {
+    return sqrtf(x*x + y*y + z*z);
+}
 
 //TIMESTAMPING//
 uint32_t getUnifiedTimestamp(uint32_t gnssTimestamp) {
@@ -253,17 +283,11 @@ void processSoundEvents() {
     static uint8_t downsampleCounter = 0;
     const uint8_t DOWNSAMPLE_FACTOR = 22;
 
-    // Debug timing
-    static uint32_t lastDebugPrint = 0;
-
     // Tunables
-    const int SOUND_THRESHOLD = 150; //362 before
+    const int SOUND_THRESHOLD = 150;
     const uint32_t COOLDOWN_MS = 50;
 
     int16_t tempBuffer[128];
-
-    // --- OPEN RAW FILE ONCE PER CALL (NOT INSIDE THE LOOP) ---
-    File rawFile = SD.open("/logs/mic_2khz.bin", FILE_WRITE);
 
     // Read all available samples
     while (mic::availableSamples() > 0) {
@@ -275,13 +299,14 @@ void processSoundEvents() {
             uint16_t absVal = (uint16_t)abs(sample);
 
             // 1) RAW 2kHz LOGGING (downsample from 44.1kHz -> ~2kHz)
-            // downsampleCounter++;
-            // if (downsampleCounter >= DOWNSAMPLE_FACTOR) {
-            //     if (rawFile) rawFile.write((const uint8_t*)&sample, sizeof(int16_t));
-            //     downsampleCounter = 0;
-            // }
+            downsampleCounter++;
+            if (downsampleCounter >= DOWNSAMPLE_FACTOR) {
+                // write raw sample to already-open mic raw file
+                sd::writeMicRaw(&sample, sizeof(sample));
+                downsampleCounter = 0;
+            }
 
-            // 2) PEAK TRACKING (for debug + event metadata)
+            // 2) PEAK TRACKING
             if ((int16_t)absVal > eventMaxPeak) eventMaxPeak = (int16_t)absVal;
 
             // 3) LOUD EVENT DETECTION
@@ -301,39 +326,9 @@ void processSoundEvents() {
         }
     }
 
-    // Close the raw file once (optional: you can keep it open globally instead)
-    if (rawFile) rawFile.close();
-
-    // --- DEBUG OUTPUT (Every 100ms) ---
-    uint32_t now = millis();
-    // if (now - lastDebugPrint >= 100) {
-    //     // Heartbeat so you KNOW the function runs in DESCENT
-    //     Serial.print("[MIC] peak=");
-    //     Serial.print(eventMaxPeak);
-
-    //     if (eventMaxPeak > 0) {
-    //         float dbfs = 20.0f * log10f((float)eventMaxPeak / 32767.0f);
-    //         float dbSPL = dbfs + 120.0f;
-
-    //         Serial.print("\tSPL=");
-    //         Serial.print(dbSPL, 1);
-    //         Serial.print(" dB\t[");
-
-    //         for (int i = 0; i < (eventMaxPeak / 2000); i++) Serial.print("=");
-    //         Serial.println("]");
-    //     } else {
-    //         Serial.println();
-    //     }
-
-    //     lastDebugPrint = now;
-
-    //     // If not in an active loud event, reset peak for the next 100ms window
-    //     if (!isEventActive) eventMaxPeak = 0;
-    // }
-
     // 4) LOG SUMMARY EVENT TO SD (after cooldown)
+    uint32_t now = millis();
     if (isEventActive && (now - lastLoudSampleTime > COOLDOWN_MS)) {
-        // Guard against divide-by-zero
         if (sampleCount == 0) {
             isEventActive = false;
             eventMaxPeak = 0;
@@ -346,18 +341,14 @@ void processSoundEvents() {
         e.rms       = (uint8_t)(sqrt(sumSquares / (double)sampleCount) / 128);
         e.duration  = (uint16_t)(lastLoudSampleTime - eventStartTime);
 
-        File f = SD.open(SD_MIC_PATH, FILE_WRITE);
-        if (f) {
-            f.printf("%u,%u,%u,%u\n", e.eventTime, e.peak, e.rms, e.duration);
-            f.close();
-        }
-
-        // Serial.println("!!! LOUD EVENT SAVED !!!");
+        // Write event summary to already-open mic event file
+        char line[64];
+        snprintf(line, sizeof(line), "%u,%u,%u,%u", e.eventTime, e.peak, e.rms, e.duration);
+        sd::writeMicEventLine(line);
 
         isEventActive = false;
         eventMaxPeak = 0;
         pushDetonationEvent(e);
-
     }
 }
 
@@ -372,80 +363,33 @@ uint8_t getDetonationEvents(DetonationEvent out[4]) {
 
 
 void flash_flushToSD() {
-    if (sampleBufferIndex == 0) {
-        Serial.println("No samples to flush.");
+    if (sampleBufferIndex == 0) return;
+
+    // Descent log must already be opened once in setup()
+    if (!sd::isDescentOpen()) {
+        Serial.println("Descent log not open!");
         return;
     }
 
-    if (sd::setup() != 0) {
-        Serial.println("SD setup failed!");
-        return;
-    }
-
-    
-    // If file does not exist yet → create it and write header
-    if (!sd::exists(SD_LOG_PATH)) {
-        if (sd::open(SD_LOG_PATH, false)) {   // false = overwrite/create
-            sd::writeLine("timestampMs,temperature,pressure,altitude");
-            sd::close();
-        }
-    }
-   
-    if (!sd::open(SD_LOG_PATH, true)) {
-        Serial.println("Failed to open SD log file!");
-        return;
-    }
-
-    // (B) Add a batch marker before writing samples
-    char batchHeader[64];
-    snprintf(batchHeader, sizeof(batchHeader), "FLUSH %lu", millis());
-    sd::writeLine(batchHeader);
-    
-    Serial.print("Flushing ");
-    Serial.print(sampleBufferIndex);
-    Serial.println(" samples to SD...");
-
+    // Write all buffered samples (or make this chunked if needed)
     for (int i = 0; i < sampleBufferIndex; i++) {
         const Sample& s = sampleBuffer[i];
 
         char line[128];
         snprintf(line, sizeof(line),
-            "%lu,%.2f,%.2f,%.2f",
-            s.timestampMs,
-            s.temperature,
-            s.pressure,
-            s.altitude
-        );
+                 "%lu,%.2f,%.2f,%.2f",
+                 s.timestampMs,
+                 s.temperature,
+                 s.pressure,
+                 s.altitude);
 
-        sd::writeLine(line);
+        sd::writeDescentLine(line);
     }
 
-    sd::flush();
-    sd::close();
-
-    Serial.println("SD flush complete.");
-    // dumpSdFile(SD_LOG_PATH);
-
+    // Clear buffer after committing the batch
     sampleBufferIndex = 0;
 }
 
-float vec3_mag(float x, float y, float z) {
-    return sqrtf(x*x + y*y + z*z);
-}
-
-//FUNCTION TO GET SAMPLES N SECONDS AGO
-bool getSampleSecondsAgo(float secondsAgo, BmpSample& out) {
-    uint32_t targetTime = millis() - (uint32_t)(secondsAgo * 1000);
-
-    for (int i = 0; i < BMP_HISTORY_SIZE; i++) {
-        int idx = (bmpHistoryIndex - 1 - i + BMP_HISTORY_SIZE) % BMP_HISTORY_SIZE;
-        if (bmpHistory[idx].timestampMs <= targetTime) {
-            out = bmpHistory[idx];
-            return true;
-        }
-    }
-    return false; // not enough history yet
-}
 
 //QA + DEUBGGING FUNCTIONS
 
@@ -460,6 +404,7 @@ void debugPrintGnss(const gnss::Location& loc) {
     Serial.print("Vel (vertical): "); Serial.println(loc.verticalVelocity);
     Serial.println("----------------------");
 }
+// TinyGPSPlus gps;
 
 
 //SETUP//
@@ -468,32 +413,130 @@ void setup() {
     Serial1.begin(9600);
     delay(1000);
     Serial.println("hello");
-    interface::setup();
+
     bool ok = true;
-    Serial.println("before lora");
-    ok &= (lora::setup() == 0);
-    gnss::setup();            // if it returns int, change to: ok &= (gnss::setup() == 0);
-    imu::setup();             // same
-    ok &= (bmp::setup() == 0);
-    pm::setup();              // same
+
+    // Helper for consistent logging
+    auto logStep = [](const char* name) {
+        Serial.print("[SETUP] ");
+        Serial.println(name);
+    };
+
+    auto logResult = [](const char* name, bool pass) {
+        Serial.print("[SETUP] ");
+        Serial.print(name);
+        Serial.print(" -> ");
+        Serial.println(pass ? "OK" : "FAIL");
+    };
+
+    logStep("interface::setup()");
+    interface::setup();
+    logResult("interface::setup()", true); // your interface::setup() is void
+
+    logStep("sd::setup()");
+    ok &= (sd::setup() == 0);
+    logResult("sd::setup()", ok);
+
+    if (ok) {
+        logStep("sd::openMicLogs()");
+        bool micOk = sd::openMicLogs();
+        ok &= micOk;
+        logResult("sd::openMicLogs()", micOk);
+
+        logStep("sd::openDescentLog()");
+        bool descOk = sd::openDescentLog(SD_LOG_PATH, "timestampMs,temperature,pressure,altitude");
+        ok &= descOk;
+        logResult("sd::openDescentLog()", descOk);
+    }
+
+    logStep("lora::setup()");
+    bool loraOk = (lora::setup() == 0);
+    ok &= loraOk;
+    logResult("lora::setup()", loraOk);
+
+    logStep("gnss::setup()");
+    gnss::setup();
+    logResult("gnss::setup()", true); // void
+
+    logStep("imu::setup()");
+    imu::setup();
+    logResult("imu::setup()", true); // void
+
+    logStep("bmp::setup()");
+    bool bmpOk = (bmp::setup() == 0);
+    ok &= bmpOk;
+    logResult("bmp::setup()", bmpOk);
+
+    logStep("pm::setup()");
+    pm::setup();
+    logResult("pm::setup()", true); // void
+
+    logStep("actuator::setup()");
     actuator::setup();
+    logResult("actuator::setup()", true); // void
+
+    logStep("actuator::undeploy()");
     actuator::undeploy();
+    logResult("actuator::undeploy()", true);
+
+    logStep("mic::setup(16384)");
     mic::setup(16384);
+    logResult("mic::setup()", true); // void
 
     if (!ok) {
-        // ERROR: at least one setup failed -> blink forever
+        Serial.println("[SETUP] ERROR: One or more subsystems failed. Blinking forever.");
         interface::startSystemBlinking();
         while (1) {
-            interface::serviceBlink();   // keep blinking
+            interface::serviceBlink();
             delay(10);
         }
     }
 
-    // All good -> steady ON
-    interface::stopSystemBlinking();   // this sets ACTIVE LED ON in your implementation
-    Serial.println("setup finished");
-
+    interface::stopSystemBlinking();
+    Serial.println("[SETUP] setup finished OK");
 }
+
+
+
+// //SETUP//
+// void setup() {
+//     Serial.begin(9600);
+//     Serial1.begin(9600);
+//     delay(1000);
+//     Serial.println("hello");
+
+//     interface::setup();
+
+//     bool ok = true;
+
+//     ok &= (sd::setup() == 0);
+//     if (ok) {
+//         ok &= sd::openMicLogs();
+//         ok &= sd::openDescentLog(SD_LOG_PATH, "timestampMs,temperature,pressure,altitude");
+//     }
+//     // --- OTHER SUBSYSTEMS ---
+//     Serial.println("before lora");
+//     ok &= (lora::setup() == 0);
+
+//     gnss::setup();
+//     imu::setup();
+//     ok &= (bmp::setup() == 0);
+//     pm::setup();
+//     actuator::setup();
+//     actuator::undeploy();
+//     mic::setup(16384);
+
+//     if (!ok) {
+//         interface::startSystemBlinking();
+//         while (1) {
+//             interface::serviceBlink();
+//             delay(10);
+//         }
+//     }
+
+//     interface::stopSystemBlinking();
+//     Serial.println("setup finished");
+// }
 
 
 //ACTIVE// 
@@ -586,19 +629,19 @@ void handleArmed() {
         freefallAccelCount = 0;
     }
 
-    // // Altitude drop condition
-    // if (b.valid) {
-    //     if (hasLastAltitude) {
-    //         float deltaAlt = lastAltitude - b.altitude; // positive if descending
-    //         if (deltaAlt > ALTITUDE_DROP_MIN) {
-    //             altitudeDropCount++;
-    //         } else {
-    //             altitudeDropCount = 0;
-    //         }
-    //     }
-    //     lastAltitude = b.altitude;
-    //     hasLastAltitude = true;
-    // }
+    // Altitude drop condition
+    if (b.valid) {
+        if (hasLastAltitude) {
+            float deltaAlt = lastAltitude - b.altitude; // positive if descending
+            if (deltaAlt > ALTITUDE_DROP_MIN) {
+                altitudeDropCount++;
+            } else {
+                altitudeDropCount = 0;
+            }
+        }
+        lastAltitude = b.altitude;
+        hasLastAltitude = true;
+    }
 
     bool accelOk = (freefallAccelCount >= FREEFALL_ACCEL_SAMPLES);
     bool altOk   = true ; //(altitudeDropCount  >= ALTITUDE_DROP_SAMPLES);
@@ -652,10 +695,18 @@ void handleArmed() {
     // ---------------------------------------------------------------
 
 }
-//DESCENT//
+
+
 void handleDescent() {
     static uint32_t lastHzTick  = 0;
     static uint32_t lastPrint   = 0;
+    static uint32_t lastFlushMs = 0;
+    static const uint32_t FLUSH_PERIOD_MS = 20000; // 20s
+
+    // Command mailbox (set in fast loop, consumed in 1 Hz block)
+    static bool cmdPending = false;
+    static uint8_t pendingCmdByte = 0;
+    static uint32_t pendingCmdMs = 0;
 
     // PM sampling timer + last valid reading cache
     static uint32_t lastPmRead = 0;
@@ -663,51 +714,28 @@ void handleDescent() {
 
     uint32_t now = millis();
 
-    // Time since entering DESCENT (used to enable touchdown detection)
     bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
 
     // HIGH-FREQUENCY POLLING (runs every loop)
     gnss::update();
     pm::update();
-    processSoundEvents();  // 2 kHz .bin logging + event detection
+    processSoundEvents();
 
-    uint8_t cmdByte = 0;
-        bool command = lora::receiveCommand(cmdByte);
+    // FAST LoRa command polling (runs every loop)
+    uint8_t cmd = 0;
+    if (lora::receiveCommand(cmd)) {
+        pendingCmdByte = cmd;
+        pendingCmdMs = now;
+        cmdPending = true;
 
-        if (command) {
-            Serial.print("[CMD] cmdByte=0x");
-            Serial.println(cmdByte, HEX);
-
-            uint8_t team = cmdByte & 0x0F;
-            if (team != (TEAM_ID & 0x0F)) {
-                Serial.print("[CMD] Not for us, team=");
-                Serial.println(team);
-            } else {
-                bool reqSci = (cmdByte & (1u << 4));
-                bool reqTel = (cmdByte & (1u << 5));
-
-                delay(60); // >= 50 ms before responding
-
-                if (reqSci) {
-                    // lora::sendScience(s);
-                }
-                // if (reqTel) { lora::sendTelemetry(loc, b.altitude); }
-
-                lastCommandMs = now;
-                flash_flushToSD();
-            }
-        } else {
-            if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
-                flash_flushToSD();
-                lastCommandMs = now;
-            }
-        }
+        Serial.print("[CMD RX] cmdByte=0x");
+        Serial.println(cmd, HEX);
+    }
 
     // 1 Hz block
     if (now - lastHzTick >= 1000) {
         lastHzTick = now;
 
-        // Read sensors at 1 Hz
         bmp::Reading b = bmp::read();
         sensors_event_t accel, gyro, mag, temp;
         imu::read(accel, gyro, mag, temp);
@@ -731,14 +759,11 @@ void handleDescent() {
             return;
         }
 
-        // Store BMP history (1 Hz)
         bmpHistory[bmpHistoryIndex] = { now, b.temperature, b.pressure, b.altitude };
         bmpHistoryIndex = (bmpHistoryIndex + 1) % BMP_HISTORY_SIZE;
 
-        // GNSS used at 1 Hz (parsing is continuous above)
         gnss::Location loc = getEnrichedLocation(b.altitude);
 
-        // Build sample (1 Hz)
         Sample s;
         s.timestampMs = loc.timestamp;
         s.temperature = b.temperature;
@@ -755,60 +780,59 @@ void handleDescent() {
 
         flash_storeSample(s);
 
-        // DEBUG: build + print science packet every 20 seconds
-//         static uint32_t lastDbg = 0;
-//         if (now - lastDbg >= 20000) {
-//         lastDbg = now;
-//         lora::debugSciencePacket(s);   // prints RAW + decoded
-// }
-
+        
         // Touchdown detection (only after minimum descent time)
-        // if (descentTimeOk && detectTouchdown(b.altitude)) {
-            // Serial.println("[DESCENT] TOUCHDOWN detected");
+        if (descentTimeOk && detectTouchdown(b.altitude)) {
+            Serial.println("[DESCENT] TOUCHDOWN detected");
 
             // Finalize microphone logging
-            // mic::stop();
+            mic::stop();
 
-            // status = Status::TOUCHDOWN;
-            // return;
-        // }
+            status = Status::TOUCHDOWN;
+            return;
+        }
 
-        // LoRa / SD flush handling (1 Hz)
-        /*uint8_t cmdByte = 0;
-        bool command = lora::receiveCommand(cmdByte);
+        // Consume command (if one arrived since last second)
+        if (cmdPending) {
+        cmdPending = false;
+        uint8_t cmdByte = pendingCmdByte;
 
-        if (command) {
-            Serial.print("[CMD] cmdByte=0x");
-            Serial.println(cmdByte, HEX);
-
-            uint8_t team = cmdByte & 0x0F;
-            if (team != (TEAM_ID & 0x0F)) {
-                Serial.print("[CMD] Not for us, team=");
-                Serial.println(team);
-            } else {
-                bool reqSci = (cmdByte & (1u << 4));
-                bool reqTel = (cmdByte & (1u << 5));
-
-                delay(60); // >= 50 ms before responding
-
-                if (reqSci) {
-                    // lora::sendScience(s);
-                }
-                // if (reqTel) { lora::sendTelemetry(loc, b.altitude); }
-
-                lastCommandMs = now;
-                flash_flushToSD();
-            }
+        uint8_t team = cmdByte & 0x0F;
+        if (team != (TEAM_ID & 0x0F)) {
+            Serial.print("[CMD] Not for us, team=");
+            Serial.println(team);
         } else {
-            if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
-                flash_flushToSD();
-                lastCommandMs = now;
+            bool reqSci = (cmdByte & (1u << 4));
+            bool reqTel = (cmdByte & (1u << 5));
+
+            Serial.print("[CMD] our team. reqSci=");
+            Serial.print(reqSci);
+            Serial.print(" reqTel=");
+            Serial.println(reqTel);
+
+            // Spec: respond >= 50 ms after receiving command
+            delay(60);
+
+            // Send exactly what was requested
+            if (reqSci) {
+                lora::sendScience(s);
             }
-        }*/
-        
+            if (reqTel) {
+                lora::sendTelemetry(loc, b.altitude);
+            }
+
+            lastCommandMs = now;
+            flash_flushToSD();
+        }
+    } else {
+        if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
+            flash_flushToSD();
+            lastCommandMs = now;
+        }
+    }
     }
 
-    // 1 Hz debug print (rich version + simple tick)
+    // 1 Hz debug print
     if (now - lastPrint >= 1000) {
         lastPrint = now;
         Serial.print("[DESCENT] tick | dt=");
@@ -817,127 +841,6 @@ void handleDescent() {
         Serial.println(descentTimeOk ? "YES" : "NO");
     }
 }
-
-// void handleDescent() {
-//     static uint32_t lastHzTick  = 0;
-//     static uint32_t lastPrint   = 0;
-
-//     // Command mailbox (set in fast loop, consumed in 1 Hz block)
-//     static bool cmdPending = false;
-//     static uint8_t pendingCmdByte = 0;
-//     static uint32_t pendingCmdMs = 0;
-
-//     // PM sampling timer + last valid reading cache
-//     static uint32_t lastPmRead = 0;
-//     static pm::Reading lastPmReading;
-
-//     uint32_t now = millis();
-
-//     bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
-
-//     // HIGH-FREQUENCY POLLING (runs every loop)
-//     gnss::update();
-//     pm::update();
-//     processSoundEvents();
-
-//     // FAST LoRa command polling (runs every loop)
-//     uint8_t cmd = 0;
-//     if (lora::receiveCommand(cmd)) {
-//         pendingCmdByte = cmd;
-//         pendingCmdMs = now;
-//         cmdPending = true;
-
-//         Serial.print("[CMD RX] cmdByte=0x");
-//         Serial.println(cmd, HEX);
-//     }
-
-//     // 1 Hz block
-//     if (now - lastHzTick >= 1000) {
-//         lastHzTick = now;
-
-//         bmp::Reading b = bmp::read();
-//         sensors_event_t accel, gyro, mag, temp;
-//         imu::read(accel, gyro, mag, temp);
-
-//         // PM SENSOR (2-second sampling)
-//         bool pmReady = false;
-//         if (now - lastPmRead >= 2000) {
-//             lastPmRead = now;
-
-//             pm::Reading pmr = pm::read();
-//             if (pmr.valid) {
-//                 lastPmReading = pmr;
-//                 pmReady = true;
-//             } else {
-//                 Serial.println("[DESCENT] PM read failed");
-//             }
-//         }
-
-//         if (!b.valid) {
-//             Serial.println("[DESCENT] BMP read failed");
-//             return;
-//         }
-
-//         bmpHistory[bmpHistoryIndex] = { now, b.temperature, b.pressure, b.altitude };
-//         bmpHistoryIndex = (bmpHistoryIndex + 1) % BMP_HISTORY_SIZE;
-
-//         gnss::Location loc = getEnrichedLocation(b.altitude);
-
-//         Sample s;
-//         s.timestampMs = loc.timestamp;
-//         s.temperature = b.temperature;
-//         s.pressure    = b.pressure;
-//         s.altitude    = b.altitude;
-
-//         if (pmReady) {
-//             s.pm2_5  = lastPmReading.pm2_5;
-//             s.pm10_0 = lastPmReading.pm10_0;
-//         } else {
-//             s.pm2_5  = lastPmReading.valid ? lastPmReading.pm2_5  : -1;
-//             s.pm10_0 = lastPmReading.valid ? lastPmReading.pm10_0 : -1;
-//         }
-
-//         flash_storeSample(s);
-
-//         // Consume command (if one arrived since last second)
-//         if (cmdPending) {
-//             cmdPending = false;
-//             uint8_t cmdByte = pendingCmdByte;
-
-//             uint8_t team = cmdByte & 0x0F;
-//             if (team != (TEAM_ID & 0x0F)) {
-//                 Serial.print("[CMD] Not for us, team=");
-//                 Serial.println(team);
-//             } else {
-//                 bool reqSci = (cmdByte & (1u << 4));
-//                 bool reqTel = (cmdByte & (1u << 5));
-//                 (void)reqTel; // silence warning until you use it
-
-//                 delay(60);
-
-//                 if (reqSci) lora::sendScience(s);
-//                 // if (reqTel) lora::sendTelemetry(loc, b.altitude);
-
-//                 lastCommandMs = now;
-//                 flash_flushToSD();
-//             }
-//         } else {
-//             if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
-//                 flash_flushToSD();
-//                 lastCommandMs = now;
-//             }
-//         }
-//     }
-
-//     // 1 Hz debug print
-//     if (now - lastPrint >= 1000) {
-//         lastPrint = now;
-//         Serial.print("[DESCENT] tick | dt=");
-//         Serial.print(descentStartMs ? (now - descentStartMs) : 0);
-//         Serial.print(" ms | touchdown_enabled=");
-//         Serial.println(descentTimeOk ? "YES" : "NO");
-//     }
-// }
 
 
 //TOUCHDOWN//
@@ -954,7 +857,7 @@ void handleTouchdown() {
     pm::Reading pmr = pm::read();
 
     gnss::Location loc = getEnrichedLocation(b.altitude);
-
+    debugPrintGnss(loc);
     // Build sample
     Sample s;
     s.timestampMs = loc.timestamp;
@@ -970,7 +873,7 @@ void handleTouchdown() {
         s.pm10_0 = -1;
         s.pm2_5  = -1;
     }
-
+    
     // LoRa command handling
     uint8_t cmdByte = 0;
     bool command = lora::receiveCommand(cmdByte);
@@ -997,7 +900,7 @@ void handleTouchdown() {
         }
 
         lastCommandMs = now;
-        flash_flushToSD();
+        // flash_flushToSD();
     }
 
         // Non-blocking tick
@@ -1043,5 +946,60 @@ void loop() {
 
 
 
+// void setup() {
+//     Serial.begin(9600);
+//     Serial.println("=== GNSS PASSTHROUGH TEST ===");
 
+//     Serial1.begin(9600);   // try 38400 later if needed
+// }
+
+// void loop() {
+//     // Serial.println("=== GNSS PASSTHROUGH TEST ===");
+//     while (Serial1.available()) {
+//         Serial.write(Serial1.read());
+//     }
+// }
+
+
+
+// void loop() {
+//   // GNSS -> PC + feed TinyGPS++
+//   while (Serial1.available()) {
+//     char c = (char)Serial1.read();
+//     gps.encode(c);      // <-- required
+//     Serial.write(c);    // raw passthrough
+//   }
+
+//   // PC -> GNSS (optional)
+//   while (Serial.available()) {
+//     Serial1.write(Serial.read());
+//   }
+
+//   // Print stats once per second
+//   static uint32_t last = 0;
+//   if (millis() - last >= 1000) {
+//     last = millis();
+
+//     Serial.print("\n[GPS] sat=");
+//     Serial.print(gps.satellites.isValid() ? gps.satellites.value() : -1);
+
+//     Serial.print(" hdop=");
+//     Serial.print(gps.hdop.isValid() ? gps.hdop.hdop() : -1);
+
+//     Serial.print(" locValid=");
+//     Serial.print(gps.location.isValid());
+
+//     Serial.print(" locAgeMs=");
+//     Serial.print(gps.location.age());
+
+//     Serial.print(" chars=");
+//     Serial.print(gps.charsProcessed());
+
+//     Serial.print(" cksumFail=");
+//     Serial.print(gps.failedChecksum());
+
+//     Serial.print(" sentencesFix=");
+//     Serial.println(gps.sentencesWithFix());
+//   }
+// }
 

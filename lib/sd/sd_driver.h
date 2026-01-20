@@ -109,4 +109,31 @@ namespace sd {
      * @return true if the path exists, false otherwise.
      */
     bool exists(const char* path);
+
+        // -----------------------------
+    // Microphone log helpers (open once, write often)
+    // -----------------------------
+
+    // Open /logs/mic_2khz.bin and /logs/acoustic.txt once at startup (append mode)
+    bool openMicLogs();
+
+    // Write raw mic bytes to mic_2khz.bin (does NOT flush every call)
+    size_t writeMicRaw(const void* data, size_t len);
+
+    // Write one CSV line to acoustic.txt (does NOT flush every call)
+    bool writeMicEventLine(const char* line);
+
+    // Optional: flush both mic files
+    void flushMicLogs();
+
+    // Optional: close both mic files
+    void closeMicLogs();
+
+
+        // Descent log (open once, write many)
+    bool openDescentLog(const char* path, const char* headerLine);
+    bool writeDescentLine(const char* line);
+    void flushDescentLog();
+    void closeDescentLog();
+    bool isDescentOpen();
 }

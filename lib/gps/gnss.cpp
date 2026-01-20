@@ -4,7 +4,6 @@
 #include "config.h"
 #include <TimeLib.h>
 
-
 namespace gnss {
 
 static TinyGPSPlus gps;
@@ -29,29 +28,49 @@ uint32_t convertToUnix(TinyGPSDate& d, TinyGPSTime& t) {
     return makeTime(tm);
 }
 
-
 Location read() {
     while (GNSS.available() > 0) {
         gps.encode(GNSS.read());
     }
 
-    Location loc;
+    Location loc{};
     loc.valid = false;
-    loc.timestamp = 0;
-    loc.verticalVelocity = 0;
 
-    if (gps.location.isUpdated() && gps.location.isValid()) {
+    static bool haveFix = false;
+    static double lastLat = 0.0, lastLon = 0.0;
+    static float  lastAlt = 0.0f;
+    static float  lastSpd = 0.0f;
+    static float  lastCrs = 0.0f;
+
+    if (gps.location.isValid()) {
         loc.latitude  = gps.location.lat();
         loc.longitude = gps.location.lng();
-        loc.altitude  = gps.altitude.meters();
-        loc.speed     = gps.speed.mps();
-        loc.course    = gps.course.deg();
-        loc.valid     = true;
+
+        loc.altitude  = gps.altitude.isValid() ? gps.altitude.meters() : 0.0f;
+        loc.speed     = gps.speed.isValid()    ? gps.speed.mps()      : 0.0f;
+        loc.course    = gps.course.isValid()   ? gps.course.deg()     : 0.0f;
+
+        loc.valid = true;
+
+        haveFix = true;
+        lastLat = loc.latitude;
+        lastLon = loc.longitude;
+        lastAlt = loc.altitude;
+        lastSpd = loc.speed;
+        lastCrs = loc.course;
+    } else if (haveFix) {
+        loc.latitude  = lastLat;
+        loc.longitude = lastLon;
+        loc.altitude  = lastAlt;
+        loc.speed     = lastSpd;
+        loc.course    = lastCrs;
+        loc.valid     = false;
     }
 
-    // Add timestamp if available
     if (gps.date.isValid() && gps.time.isValid()) {
         loc.timestamp = convertToUnix(gps.date, gps.time);
+    } else {
+        loc.timestamp = 0;
     }
 
     return loc;
@@ -59,14 +78,16 @@ Location read() {
 
 void update() {
     while (GNSS.available() > 0) {
-        gps.encode(GNSS.read());
+        gps.encode((char)GNSS.read());
     }
 }
-
 
 void end() {
     GNSS.end();
 }
+
+} // namespace gnss
+
 
 
 // // void setup() {
@@ -101,4 +122,4 @@ void end() {
 //     }
 // }
 
-}
+

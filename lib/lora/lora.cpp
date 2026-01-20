@@ -238,6 +238,9 @@ namespace lora {
         packInt16(lastVel, &packet[7]);
         packUInt16((uint16_t)(bmpAltitude * 10.0), &packet[9]);
         packUInt32(lastTs, &packet[11]);
+        packet[15] = crc8_ccitt_07_msb(packet, 15);
+
+        
     }
 
     bool sendTelemetry(const gnss::Location& loc, float bmpAltitude) {
