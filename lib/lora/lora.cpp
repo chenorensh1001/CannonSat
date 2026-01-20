@@ -99,13 +99,13 @@ namespace lora {
         LoRa.setCodingRate4(LORA_CODING_RATE);
         LoRa.endPacket(false); 
 
-        Serial.println("LoRa ready and listening...");
-        Serial.println("=== LoRa CONFIG (probe) ===");
-        Serial.print("Freq (Hz): "); Serial.println((uint32_t)LORA_FREQ);
-        Serial.print("SF: "); Serial.println(LORA_SPREADING_FACTOR);
-        Serial.print("BW: "); Serial.println(LORA_BANDWIDTH);
-        Serial.print("CR4/: "); Serial.println(LORA_CODING_RATE);
-        Serial.print("TX pwr: "); Serial.println(LORA_TX_POWER);
+        // Serial.println("LoRa ready and listening...");
+        // Serial.println("=== LoRa CONFIG (probe) ===");
+        // Serial.print("Freq (Hz): "); Serial.println((uint32_t)LORA_FREQ);
+        // Serial.print("SF: "); Serial.println(LORA_SPREADING_FACTOR);
+        // Serial.print("BW: "); Serial.println(LORA_BANDWIDTH);
+        // Serial.print("CR4/: "); Serial.println(LORA_CODING_RATE);
+        // Serial.print("TX pwr: "); Serial.println(LORA_TX_POWER);
 
         LoRa.receive();
 
@@ -149,7 +149,7 @@ namespace lora {
 
         LoRa.beginPacket();
         LoRa.write((const uint8_t*)msg, len);
-        int err = LoRa.endPacket(true);  // async
+        int err = LoRa.endPacket(false);  // async
         if (err == 1) {
             LoRa.receive(); // back to RX
             return true;
@@ -196,6 +196,7 @@ namespace lora {
             // Debug print (very useful while testing)
             Serial.print("[RX] len="); Serial.print(len);
             Serial.print(" bytes: ");
+            LoRa.receive();
             for (size_t i = 0; i < len; i++) {
                 uint8_t b = (uint8_t)buf[i];
                 if (b < 0x10) Serial.print("0");
@@ -307,7 +308,7 @@ namespace lora {
 
     void buildSciencePacket(uint8_t* packet, const Sample& s) {
         memset(packet, 0, 80);
-
+        Serial.println("startingtobuild");
         // Packet ID + Team ID (Team 4)
         packet[0] = 0x14;
 
@@ -416,6 +417,7 @@ namespace lora {
         uint8_t packet[80];
         buildSciencePacket(packet, s);
         return send((const char*)packet, 80);
+        
     }
 
     void debugSciencePacket(const Sample& s) {

@@ -491,7 +491,8 @@ void setup() {
 
     // All good -> steady ON
     interface::stopSystemBlinking();   // this sets ACTIVE LED ON in your implementation
-    
+    Serial.println("setup finished");
+
 }
 
 
@@ -730,15 +731,15 @@ void handleDescent() {
 // }
 
         // Touchdown detection (only after minimum descent time)
-        if (descentTimeOk && detectTouchdown(b.altitude)) {
-            Serial.println("[DESCENT] TOUCHDOWN detected");
+        // if (descentTimeOk && detectTouchdown(b.altitude)) {
+            // Serial.println("[DESCENT] TOUCHDOWN detected");
 
             // Finalize microphone logging
             // mic::stop();
 
             // status = Status::TOUCHDOWN;
             // return;
-        }
+        // }
 
         // LoRa / SD flush handling (1 Hz)
         uint8_t cmdByte = 0;

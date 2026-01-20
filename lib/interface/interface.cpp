@@ -3,8 +3,8 @@
 namespace interface {
 
     // Pins
-    const int PIN_BTN_ARM   = 28;
-    const int PIN_BTN_RESET = 11;
+    const int PIN_BTN_ARM   = 11; //11
+    const int PIN_BTN_RESET = 28;
     const int PIN_LED_ARMED       = 20;
     const int PIN_LED_ARMED_GROUND       = 21;
     const int PIN_LED_ACTIVE         = 13; // green (active - 13) (HIGH side yellow - 20 on) (red active -- 15 ground -- 14)
