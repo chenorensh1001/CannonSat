@@ -15,6 +15,7 @@
 
 // Path to SD log file
 const char* SD_LOG_PATH = "/logs/descent.txt";
+const char* SD_MIC_PATH = "/logs/acoustic.txt";
 
 // RAM buffer for samples
 constexpr int SAMPLE_BUFFER_SIZE = 512;
@@ -36,8 +37,10 @@ Status status = Status::ACTIVE;
 // Timing
 unsigned long armTimeMs = 0; // logging the time the armed button was pressed
 unsigned long lastCommandMs = 0; // logging the exact time the command packet was last received
-const unsigned long MIN_FREEFALL_TIME_MS = 1000;    // example: 3 seconds after arming
-const unsigned long COMMAND_TIMEOUT_MS   = 20000;   // 40 seconds
+const unsigned long MIN_FREEFALL_TIME_MS = 3000;    // example: 3 seconds after arming
+const unsigned long MIN_DESCENT_TIME_MS = 10000; // 10 seconds
+unsigned long descentStartMs = 0;
+const unsigned long COMMAND_TIMEOUT_MS   = 22000;   // 22 seconds
 static bool gnssEverValid = false; // variables for syncing the teensy internal clock and the GNSS
 static uint32_t lastGnssUnix = 0; // variables for syncing the teensy internal clock and the GNSS
 static uint32_t lastGnssMillis = 0; // variables for syncing the teensy internal clock and the GNSS
@@ -186,6 +189,7 @@ bool detectTouchdown(float currentAltitude) {
 
     return false;
 }
+
 //READ SD CARD FUNCTION
 void dumpSdFile(const char* filename) {
     Serial.print("Opening file: ");
@@ -204,6 +208,86 @@ void dumpSdFile(const char* filename) {
     Serial.println("\n----- FILE END -----");
 
     f.close();
+}
+
+// MICROPHONE EVENT PROCESSING //
+void processSoundEvents() {
+    // --- Event Detection Variables ---
+    static bool isEventActive = false;
+    static uint32_t eventStartTime = 0;
+    static uint32_t lastLoudSampleTime = 0;
+    static int16_t eventMaxPeak = 0;
+    static double sumSquares = 0;
+    static uint32_t sampleCount = 0;
+
+    // --- Continuous 2kHz Downsampling Variables ---
+    static uint8_t downsampleCounter = 0;
+    const uint8_t DOWNSAMPLE_FACTOR = 22; // 44100 / 22 = ~2004 Hz
+    
+    const int SOUND_THRESHOLD = 362; // Adapt to sound threshold desired
+    const uint32_t COOLDOWN_MS = 50; 
+    int16_t tempBuffer[128];
+
+    // Process all samples waiting in the I2S ring buffer
+    while (mic::availableSamples() > 0) {
+        size_t readCount = mic::readBuffer(tempBuffer, 128);
+        uint32_t now = millis();
+
+        // Open the continuous log for this block of samples
+        // We use binary mode for speed and space efficiency at 2kHz
+        File rawFile = SD.open("/logs/mic_2khz.bin", FILE_WRITE);
+
+        for (size_t i = 0; i < readCount; i++) {
+            int16_t sample = tempBuffer[i];
+            uint16_t absVal = abs(sample);
+
+            // 1. CONTINUOUS 2kHz LOGGING (Decimation)
+            // Take every 22nd sample from the 44.1kHz stream
+            downsampleCounter++;
+            if (downsampleCounter >= DOWNSAMPLE_FACTOR) {
+                if (rawFile) {
+                    rawFile.write((const uint8_t*)&sample, sizeof(int16_t));
+                }
+                downsampleCounter = 0;
+            }
+
+            // 2. LOUD EVENT DETECTION 
+            if (absVal > SOUND_THRESHOLD) {
+                lastLoudSampleTime = now;
+                if (!isEventActive) {
+                    isEventActive = true;
+                    eventStartTime = now;
+                    eventMaxPeak = 0;
+                    sumSquares = 0;
+                    sampleCount = 0;
+                }
+                if (absVal > eventMaxPeak) eventMaxPeak = absVal;
+                sumSquares += (double)sample * sample;
+                sampleCount++;
+            }
+        }
+        
+        // Close raw file after processing this 128-sample block
+        if (rawFile) rawFile.close();
+    }
+
+    // 3. LOG SUMMARY EVENT (If a loud event just finished)
+    if (isEventActive && (millis() - lastLoudSampleTime > COOLDOWN_MS)) {
+        DetonationEvent e;
+        // eventTime is seconds since the descent started
+        e.eventTime = (uint16_t)((eventStartTime - activeStartMs) / 1000);
+        e.peak      = (uint8_t)(eventMaxPeak / 128); 
+        e.rms       = (uint8_t)(sqrt(sumSquares / sampleCount) / 128); 
+        e.duration  = (uint16_t)(lastLoudSampleTime - eventStartTime);
+
+        File f = SD.open(SD_MIC_PATH, FILE_WRITE);
+        if (f) {
+            f.printf("%u,%u,%u,%u\n", e.eventTime, e.peak, e.rms, e.duration);
+            f.close();
+            Serial.printf("[MIC] EVENT DETECTED: Time=%us, Peak=%u\n", e.eventTime, e.peak);
+        }
+        isEventActive = false;
+    }
 }
 
 
@@ -299,7 +383,6 @@ void debugPrintGnss(const gnss::Location& loc) {
 
 
 //SETUP//
-
 void setup() {
     Serial.begin(9600);
     Serial1.begin(9600);
@@ -327,7 +410,7 @@ void setup() {
 }
 
 
-//ACTIVE// - without any LEDS or buttons, they will have to be added once arrived. I have a draft for the function that should be implemented when they arrive under this one
+//ACTIVE// 
 void handleActive() {
     static bool armedLatched = false;   // prevents re-arming logic from running again
 
@@ -335,25 +418,37 @@ void handleActive() {
 
     // Always update interface (debounce + any LED service you might have)
     interface::update();
+    mic::discardBuffer();
 
     // If ARM button pressed -> go ARMED and turn on yellow LED
-    if (!armedLatched && interface::armPressed()) {
-        armedLatched = true;
-
+    if (interface::armPressed()) {
+        unsigned long now = millis();
         Serial.println("[ACTIVE] ARM button pressed -> ARMED");
-        interface::setArmedLed(true);   // yellow ON
-
         status = Status::ARMED;
-        armTimeMs = now;                // start ARMED timer
-        return;
+        armTimeMs = now;                 
+        freefallAccelCount = 0;          
+        altitudeDropCount = 0;
+        hasLastAltitude = false;
+        interface::setArmedLed(true);
     }
 }
-
+   
 
 //ARMED//
-
 void handleArmed() {
     unsigned long now = millis();
+
+    //  freefall timing condition
+    if (now - armTimeMs < MIN_FREEFALL_TIME_MS) {
+        static unsigned long lastWaitPrint = 0;
+        if (now - lastWaitPrint > 500) {  // 2 Hz
+            lastWaitPrint = now;
+            Serial.print("[ARMED] Waiting before freefall logic: ");
+            Serial.print(MIN_FREEFALL_TIME_MS - (now - armTimeMs));
+            Serial.println(" ms remaining");
+        }
+        return;  
+    }
 
     static unsigned long lastTickPrint = 0;
     if (now - lastTickPrint > 1000) {   // 1 Hz
@@ -429,12 +524,16 @@ void handleArmed() {
     if (accelOk && altOk && timeOk) {
         Serial.println("Freefall detected → DESCENT");
         actuator::trigger(); // deploy
-        Serial.println("ACTUATOR DE");
+        Serial.println("ACTUATOR DEPLOYED");
         status = Status::DESCENT;
+        descentStartMs = now;
         freefallAccelCount = 0;
         altitudeDropCount = 0;
         lastCommandMs = now;
+        return;
     }
+
+    mic::discardBuffer();
 
         // ---------------- DEBUG: Deployment conditions ----------------
     static unsigned long lastCondPrint = 0;
@@ -469,44 +568,35 @@ void handleArmed() {
     }
     // ---------------------------------------------------------------
 
-    // delay(50); // sampling rate during ARMED
 }
-
 //DESCENT//
 void handleDescent() {
     static uint32_t lastHzTick = 0;
-    static uint32_t lastPrint = 0;
-
-    // NEW: PM sampling timer
+    static uint32_t lastPrint  = 0;
     static uint32_t lastPmRead = 0;
-    static pm::Reading lastPmReading;   // store last valid reading
+    static pm::Reading lastPmReading;
 
-    // Serial.println("start");
     uint32_t now = millis();
 
-    // GNSS must always be updated continuously
+    // Time since entering DESCENT
+    bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
+
     gnss::update();
     pm::update();
 
-    // 1 Hz block
     if (now - lastHzTick >= 1000) {
         lastHzTick = now;
 
-        // Read sensors at 1 Hz
         bmp::Reading b = bmp::read();
         sensors_event_t accel, gyro, mag, temp;
         imu::read(accel, gyro, mag, temp);
 
-        // --- PM SENSOR (2-second sampling) ---
-        pm::Reading pmr;
         bool pmReady = false;
-
         if (now - lastPmRead >= 2000) {
             lastPmRead = now;
-            pmr = pm::read();
-
+            pm::Reading pmr = pm::read();
             if (pmr.valid) {
-                lastPmReading = pmr;   // store the newest valid reading
+                lastPmReading = pmr;
                 pmReady = true;
             } else {
                 Serial.println("[DESCENT] PM read failed");
@@ -518,49 +608,36 @@ void handleDescent() {
             return;
         }
 
-        // Store BMP history (1 Hz)
-        bmpHistory[bmpHistoryIndex] = {
-            now,
-            b.temperature,
-            b.pressure,
-            b.altitude,
-        };
+        bmpHistory[bmpHistoryIndex] = { now, b.temperature, b.pressure, b.altitude };
         bmpHistoryIndex = (bmpHistoryIndex + 1) % BMP_HISTORY_SIZE;
 
-        // GNSS (continuous parsing, but used at 1 Hz)
         gnss::Location loc = getEnrichedLocation(b.altitude);
 
-        // Build sample (1 Hz)
         Sample s;
         s.timestampMs = loc.timestamp;
         s.temperature = b.temperature;
         s.pressure    = b.pressure;
         s.altitude    = b.altitude;
+
         if (pmReady) {
-            // s.pm1_0  = lastPmReading.pm1_0;
             s.pm2_5  = lastPmReading.pm2_5;
             s.pm10_0 = lastPmReading.pm10_0;
         } else {
-            // No new PM packet this second → reuse last valid or mark invalid
-            // s.pm1_0  = lastPmReading.valid ? lastPmReading.pm1_0  : -1;
             s.pm2_5  = lastPmReading.valid ? lastPmReading.pm2_5  : -1;
             s.pm10_0 = lastPmReading.valid ? lastPmReading.pm10_0 : -1;
         }
 
-        // Serial.print("PM10 = ");
-        // Serial.println(s.pm10_0);
-
         flash_storeSample(s);
 
-        // Touchdown detection (1 Hz IMU + BMP)
-        if (detectTouchdown(b.altitude)) {
+        // Touchdown detection only after minimum descent time
+        if (descentTimeOk && detectTouchdown(b.altitude)) {
             Serial.println("[DESCENT] TOUCHDOWN detected");
             status = Status::TOUCHDOWN;
             return;
         }
 
-        // LoRa command handling (1 Hz)
-        bool command = false;  // indoor test
+        // LoRa / SD flush handling (unchanged)
+        bool command = false;
         if (command) {
             lastCommandMs = now;
             lora::sendScience(s);
@@ -573,14 +650,16 @@ void handleDescent() {
         }
     }
 
-    // 1 Hz debug print
     if (now - lastPrint >= 1000) {
         lastPrint = now;
-        Serial.println("[DESCENT] tick");
+        Serial.print("[DESCENT] tick | dt=");
+        Serial.print(descentStartMs ? (now - descentStartMs) : 0);
+        Serial.print(" ms | touchdown_enabled=");
+        Serial.println(descentTimeOk ? "YES" : "NO");
     }
 }
 
-
+//TOUCHDOWN//
 void handleTouchdown() {
     static unsigned long lastPrint = 0;
     unsigned long now = millis();
@@ -654,13 +733,6 @@ void loop() {
         actuatorDeployed = false;  // optional depending on your mission rules
 
         Serial.println("RESET → ACTIVE");
-    }
-
-    // ARM button only works from ACTIVE
-    if (interface::armPressed() && status == Status::ACTIVE) {
-        status = Status::ARMED;
-        interface::setArmedLed(true);
-        Serial.println("ACTIVE → ARMED");
     }
 
 // Status
