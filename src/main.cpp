@@ -84,8 +84,10 @@ static volatile uint8_t detEventCount = 0;
 static DetonationEvent detEvents[4]; // store last 4 sound events in struct detEvents, when communication window communicate those
 
 //HELPER FUNCTIONS
+static bool commandReceived = false;
+static uint8_t lastCmdByte = 0;
 
-    //TIMESTAMPING//
+//TIMESTAMPING//
 uint32_t getUnifiedTimestamp(uint32_t gnssTimestamp) {
     static bool gnssEverValid = false;
     static uint32_t lastGnssUnix = 0;
@@ -464,8 +466,12 @@ void debugPrintGnss(const gnss::Location& loc) {
 void setup() {
     Serial.begin(9600);
     Serial1.begin(9600);
+    delay(1000);
+    Serial.println("hello");
     interface::setup();
     bool ok = true;
+    Serial.println("before lora");
+    ok &= (lora::setup() == 0);
     gnss::setup();            // if it returns int, change to: ok &= (gnss::setup() == 0);
     imu::setup();             // same
     ok &= (bmp::setup() == 0);
@@ -485,6 +491,7 @@ void setup() {
 
     // All good -> steady ON
     interface::stopSystemBlinking();   // this sets ACTIVE LED ON in your implementation
+    
 }
 
 
@@ -715,29 +722,57 @@ void handleDescent() {
 
         flash_storeSample(s);
 
+        // DEBUG: build + print science packet every 20 seconds
+//         static uint32_t lastDbg = 0;
+//         if (now - lastDbg >= 20000) {
+//         lastDbg = now;
+//         lora::debugSciencePacket(s);   // prints RAW + decoded
+// }
+
         // Touchdown detection (only after minimum descent time)
         if (descentTimeOk && detectTouchdown(b.altitude)) {
             Serial.println("[DESCENT] TOUCHDOWN detected");
 
             // Finalize microphone logging
-            mic::stop();
+            // mic::stop();
 
-            status = Status::TOUCHDOWN;
-            return;
+            // status = Status::TOUCHDOWN;
+            // return;
         }
 
         // LoRa / SD flush handling (1 Hz)
-        bool command = false;  // indoor test
+        uint8_t cmdByte = 0;
+        bool command = lora::receiveCommand(cmdByte);
+
         if (command) {
-            lastCommandMs = now;
-            lora::sendScience(s);
-            flash_flushToSD();
+            Serial.print("[CMD] cmdByte=0x");
+            Serial.println(cmdByte, HEX);
+
+            uint8_t team = cmdByte & 0x0F;
+            if (team != (TEAM_ID & 0x0F)) {
+                Serial.print("[CMD] Not for us, team=");
+                Serial.println(team);
+            } else {
+                bool reqSci = (cmdByte & (1u << 4));
+                bool reqTel = (cmdByte & (1u << 5));
+
+                delay(60); // >= 50 ms before responding
+
+                if (reqSci) {
+                    lora::sendScience(s);
+                }
+                // if (reqTel) { lora::sendTelemetry(loc, b.altitude); }
+
+                lastCommandMs = now;
+                flash_flushToSD();
+            }
         } else {
             if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
                 flash_flushToSD();
                 lastCommandMs = now;
             }
         }
+        
     }
 
     // 1 Hz debug print (rich version + simple tick)
@@ -783,24 +818,40 @@ void handleTouchdown() {
     }
 
     // LoRa command handling
-    bool command = false;  // indoor test
+    uint8_t cmdByte = 0;
+    bool command = lora::receiveCommand(cmdByte);
+
     if (command) {
-        lastCommandMs = now;
-        lora::sendScience(s);
-        flash_flushToSD();
-    } else {
-        if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
-            flash_flushToSD();
-            lastCommandMs = now;
+        uint8_t team = cmdByte & 0x0F;
+        if (team != (TEAM_ID & 0x0F)) {
+            Serial.print("[CMD] Not for us, team="); Serial.println(team);
+            return;  // or ignore
         }
+
+        Serial.print("[CMD] cmdByte=0x"); Serial.println(cmdByte, HEX);
+
+        bool reqSci = (cmdByte & (1u << 4));
+        bool reqTel = (cmdByte & (1u << 5));
+
+        delay(60); // >= 50 ms
+
+        if (reqTel) {
+            // lora::sendTelemetry(loc, bmpAlt);
+        }
+        if (reqSci) {
+            lora::sendScience(s);
+        }
+
+        lastCommandMs = now;
+        flash_flushToSD();
     }
 
-    // Non-blocking tick
-    if (now - lastPrint > 1000) {
-        lastPrint = now;
-        Serial.println("[TOUCHDOWN] tick");
+        // Non-blocking tick
+        if (now - lastPrint > 1000) {
+            lastPrint = now;
+            Serial.println("[TOUCHDOWN] tick");
+        }
     }
-}
 
 
 

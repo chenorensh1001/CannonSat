@@ -6,7 +6,6 @@
 #include "lora_driver.h"
 #include "config.h"
 #include <stdint.h>
-#include "detonation_event.h"
 
 struct DetonationEvent {
     uint8_t  eventTime;   // seconds since ACTIVE start (1 byte per packet spec)
@@ -21,21 +20,19 @@ bool getSampleSecondsAgo(float secondsAgo, BmpSample& out);
 uint8_t getDetonationEvents(DetonationEvent out[4]);
 
 namespace {
-
-
-    uint8_t crc8_ccitt(const uint8_t *data, size_t len) {
+    uint8_t crc8_ccitt_07_msb(const uint8_t* data, size_t len) {
         uint8_t crc = 0x00;
-        while (len--) {
-            uint8_t extract = *data++;
-            for (uint8_t i = 8; i; i--) {
-                uint8_t sum = (crc ^ extract) & 0x01;
-                crc >>= 1;
-                if (sum) crc ^= 0x8C;
-                extract >>= 1;
+        for (size_t i = 0; i < len; i++) {
+            crc ^= data[i];
+            for (uint8_t j = 0; j < 8; j++) {
+                if (crc & 0x80) crc = (uint8_t)((crc << 1) ^ 0x07);
+                else           crc = (uint8_t)(crc << 1);
             }
         }
         return crc;
     }
+
+
 
     // Pack 24-bit signed integer (for lat/lon)
     void packInt24(int32_t value, uint8_t *buf) {
@@ -78,11 +75,17 @@ namespace lora {
         volatile int pendingPacketSize = 0;
     }
 
+
     // ---------------------------------------------------------------------
     // Basic radio control
     // ---------------------------------------------------------------------
     //Last known valid GNSS values for the telemery packet
     int setup() {
+        // SPI1.begin();
+        SPI1.setSCK(27);
+        SPI1.setMOSI(26);
+        SPI1.setMISO(39);
+        LoRa.setSPI(SPI1);
         LoRa.setPins(RFM95_CS, RFM95_RST, RFM95_INT);  // CS, RST, DIO0
 
         if (!LoRa.begin(LORA_FREQ)) {
@@ -90,15 +93,22 @@ namespace lora {
             return 1;
         }
         Serial.println("LoRa initialized");
-
-        LoRa.setTxPower(LORA_TX_POWER);
+        LoRa.setTxPower(LORA_TX_POWER, PA_OUTPUT_PA_BOOST_PIN);
         LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
         LoRa.setSignalBandwidth(LORA_BANDWIDTH);
         LoRa.setCodingRate4(LORA_CODING_RATE);
-
-        Serial.println("LoRa ready and listening...");
-
+        LoRa.endPacket(false); 
+        
+        // Serial.println("LoRa ready and listening...");
+        // Serial.println("=== LoRa CONFIG (probe) ===");
+        // Serial.print("Freq (Hz): "); Serial.println((uint32_t)LORA_FREQ);
+        // Serial.print("SF: "); Serial.println(LORA_SPREADING_FACTOR);
+        // Serial.print("BW: "); Serial.println(LORA_BANDWIDTH);
+        // Serial.print("CR4/: "); Serial.println(LORA_CODING_RATE);
+        // Serial.print("TX pwr: "); Serial.println(LORA_TX_POWER);
+        // Serial.println("===========================");
         LoRa.receive();
+
         return 0;
     }
 
@@ -122,6 +132,7 @@ namespace lora {
         }
         return false;
     }
+
 
     // ---------------------------------------------------------------------
     // Raw send/receive helpers used by higher-level packet builders
@@ -163,6 +174,38 @@ namespace lora {
         pendingPacketSize = 0;
         return true;
     }
+
+    //receivecommand//
+    bool receiveCommand(uint8_t& cmdByteOut) {
+            Serial.println("receiveCommand called");
+            if (!packetAvailable()) return false;
+            Serial.println("yes1");
+
+            char buf[8];
+            size_t len = sizeof(buf);
+
+            // This uses your internal lora::receive() (currently in lora.cpp)
+            if (!receive(buf, len)) return false;
+
+            // Debug print (very useful while testing)
+            Serial.print("[RX] len="); Serial.print(len);
+            Serial.print(" bytes: ");
+            for (size_t i = 0; i < len; i++) {
+                uint8_t b = (uint8_t)buf[i];
+                if (b < 0x10) Serial.print("0");
+                Serial.print(b, HEX);
+                Serial.print(" ");
+            }
+            Serial.println();
+
+            // Command packet is exactly 2 bytes: 0x00, cmd
+            if (len != 2) return false;
+            if ((uint8_t)buf[0] != 0x00) return false;
+
+            cmdByteOut = (uint8_t)buf[1];
+            return true;
+        }
+
 
     // ---------------------------------------------------------------------
     // Telemetry Packet
@@ -252,165 +295,159 @@ namespace lora {
     // }
 
 
+// ---------------------------------------------------------------------
+// Science Packet
+// ---------------------------------------------------------------------
 
-    // ---------------------------------------------------------------------
-    // Science Packet
-    // ---------------------------------------------------------------------
+    void buildSciencePacket(uint8_t* packet, const Sample& s) {
+        memset(packet, 0, 80);
+
+        // Packet ID + Team ID (Team 4)
+        packet[0] = 0x14;
+
+        // Timestamp (Unix seconds)
+        uint32_t unixTime = (uint32_t)(s.timestampMs / 1000);
+        packUInt32(unixTime, &packet[1]);
+
+        // Bitmap (update later if you want it dynamic)
+        packet[5] = 0x0B;
+
+        // ---------------------------
+        // Detonation events (bytes 6–25)
+        // ---------------------------
+        DetonationEvent ev[4] = {};
+        uint8_t nEv = getDetonationEvents(ev);
+
+        for (uint8_t i = 0; i < nEv && i < 4; i++) {
+            uint8_t base = 6 + i * 5;
+            packet[base + 0] = ev[i].eventTime;            // 1 byte
+            packet[base + 1] = ev[i].peak;                 // 1 byte
+            packet[base + 2] = ev[i].rms;                  // 1 byte
+            packUInt16(ev[i].duration, &packet[base + 3]); // 2 bytes
+        }
+
+        // ---------------------------
+        // Secondary payloads (bytes 26–46): 3 samples × 7 bytes
+        // Each sample: PM2.5(2) + PM10(2) + Pressure(2) + Temp(1)
+        // ---------------------------
+        BmpSample s0{}, s7{}, s14{};
+        bool ok0  = getSampleSecondsAgo(0,  s0);
+        bool ok7  = getSampleSecondsAgo(7,  s7);
+        bool ok14 = getSampleSecondsAgo(14, s14);
+
+        // Fallbacks if history not ready
+        if (!ok0) {
+            s0.temperature = -999;
+            s0.pressure    = -999;
+            s0.altitude    = -999;
+            s0.verticalVelocity = 0;
+        }
+        if (!ok7)  s7  = s0;
+        if (!ok14) s14 = s0;
+
+        BmpSample samples[3] = { s0, s7, s14 };
+
+        auto encodeTemp = [](float tC) -> uint8_t {
+            // 0.5°C resolution: enc = (tC + 25) * 2
+            if (tC < -25.0f) tC = -25.0f;
+            if (tC > 102.5f) tC = 102.5f;
+            return (uint8_t)((tC + 25.0f) * 2.0f);
+        };
+
+        auto encodePressure = [](float pPa) -> int16_t {
+            // enc = (p - 101325) / 50
+            float x = (pPa - 101325.0f) / 50.0f;
+            if (x < -32768.0f) x = -32768.0f;
+            if (x >  32767.0f) x =  32767.0f;
+            return (int16_t)x;
+        };
+
+        auto encodePM = [](float pm) -> uint16_t {
+            // 0.1 ug/m3 resolution
+            if (pm < 0) return 0;
+            if (pm > 6553.5f) pm = 6553.5f;
+            return (uint16_t)(pm * 10.0f);
+        };
+
+        for (int i = 0; i < 3; i++) {
+            uint8_t base = 26 + i * 7;
+
+            // Use latest PM reading for all 3 timestamps
+            uint16_t pm25 = encodePM(s.pm2_5);
+            uint16_t pm10 = encodePM(s.pm10_0);
+
+            packUInt16(pm25, &packet[base + 0]);   // 26–27, 33–34, 40–41
+            packUInt16(pm10, &packet[base + 2]);   // 28–29, 35–36, 42–43
+
+            int16_t pEnc = encodePressure(samples[i].pressure);
+            packInt16(pEnc, &packet[base + 4]);    // 30–31, 37–38, 44–45
+
+            packet[base + 6] = encodeTemp(samples[i].temperature); // 32, 39, 46
+        }
+
+        // ---------------------------
+        // Telemetry (bytes 71–78)
+        // ---------------------------
+        auto encodeAltitude = [](float altM) -> uint16_t {
+            if (altM < 0) altM = 0;
+            float x = altM * 10.0f;            // 0.1 m
+            if (x > 65535.0f) x = 65535.0f;
+            return (uint16_t)x;
+        };
+
+        packUInt16(encodeAltitude(s0.altitude),  &packet[71]);
+        packUInt16(encodeAltitude(s7.altitude),  &packet[73]);
+        packUInt16(encodeAltitude(s14.altitude), &packet[75]);
+
+        int16_t velEnc = (int16_t)(s0.verticalVelocity * 100.0f);
+        packInt16(velEnc, &packet[77]);
+
+        // CRC
+        packet[79] = crc8_ccitt_07_msb(packet, 79);
+    }
 
     bool sendScience(const Sample& s) {
-    uint8_t packet[80];
-    memset(packet, 0, 80);
-
-    // Packet ID + Team ID (Team 4)
-    packet[0] = 0x14;
-
-    // Timestamp (Unix seconds)
-    uint32_t unixTime = s.timestampMs / 1000;
-    packUInt32(unixTime, &packet[1]);
-
-    // Bitmap
-    packet[5] = 0x0B;
-    
-    //Detontaion Events
-    DetonationEvent ev[4];
-    uint8_t nEv = getDetonationEvents(ev);
-
-    for (uint8_t i = 0; i < nEv && i < 4; i++) {
-        uint8_t base = 6 + i * 5;
-        packet[base + 0] = (uint8_t)ev[i].eventTime; // 1 byte per spec
-        packet[base + 1] = ev[i].peak;
-        packet[base + 2] = ev[i].rms;
-        packUInt16(ev[i].duration, &packet[base + 3]); // big-endian (your packUInt16)
+        uint8_t packet[80];
+        buildSciencePacket(packet, s);
+        return send((const char*)packet, 80);
     }
 
-    // Secondary payload block (bytes 26–40): 3 samples × 7 bytes
-    // Retrieve 3 BMP samples: 0s, 7s, 14s ago
-    BmpSample s0{}, s7{}, s14{};
-    bool ok0  = getSampleSecondsAgo(0,  s0);
-    bool ok7  = getSampleSecondsAgo(7,  s7);
-    bool ok14 = getSampleSecondsAgo(14, s14);
+    void debugSciencePacket(const Sample& s) {
+        uint8_t packet[80];
+        buildSciencePacket(packet, s);
 
-    // Fallbacks if history not ready yet
-    if (!ok0)  { s0.timestampMs = millis(); s0.temperature = s.temperature; s0.pressure = s.pressure; s0.altitude = s.altitude; s0.verticalVelocity = 0; }
-    if (!ok7)  s7  = s0;
-    if (!ok14) s14 = s0;
+        Serial.println("\n[DEBUG] ===== SCIENCE PACKET (RAW 80 BYTES) =====");
+        for (int i = 0; i < 80; i++) {
+            if (i % 16 == 0) Serial.println();
+            Serial.printf("%02X ", packet[i]);
+        }
+        Serial.println("\n[DEBUG] =========================================");
 
-BmpSample samples[3] = { s0, s7, s14 };
+        Serial.println("[DEBUG] Detonation events decoded:");
+        for (int i = 0; i < 4; i++) {
+            uint8_t base = 6 + i * 5;
+            uint8_t  t   = packet[base + 0];
+            uint8_t  pk  = packet[base + 1];
+            uint8_t  rms = packet[base + 2];
+            uint16_t dur = (uint16_t)((packet[base + 3] << 8) | packet[base + 4]);
 
-    BmpSample samples[3] = { s0, s7, s14 };
+            Serial.printf("  Ev%d: time=%u s, peak=%u, rms=%u, dur=%u ms\n",
+                        i + 1, t, pk, rms, dur);
+        }
 
-    auto encodeTemp = [](float tC) -> uint8_t {
-        return (uint8_t)((tC + 25.0f) * 2.0f);   // 0.5°C resolution, compatible with -25 until 25 celsius, 
-    };
+        Serial.println("[DEBUG] Secondary payloads decoded (PM2.5, PM10, PressureEnc, TempEnc):");
+        for (int i = 0; i < 3; i++) {
+            uint8_t base = 26 + i * 7;
+            uint16_t pm25 = (uint16_t)((packet[base + 0] << 8) | packet[base + 1]);
+            uint16_t pm10 = (uint16_t)((packet[base + 2] << 8) | packet[base + 3]);
+            int16_t  pEnc = (int16_t)((packet[base + 4] << 8) | packet[base + 5]);
+            uint8_t  tEnc = packet[base + 6];
 
-    auto encodePressure = [](float pPa) -> int16_t {
-        float x = (pPa - 101325.0f) / 50.0f;
-        if (x < -32768.0f) x = -32768.0f;
-        if (x >  32767.0f) x =  32767.0f;
-        return (int16_t)x;
-    };         // Spec: Pressure 2 bytes. Your encoding: (p-101325)/50 in Pa.
-        // Clamp to int16 range.
+            Serial.printf("  S%d: pm25=%u pm10=%u pEnc=%d tEnc=%u\n",
+                        i + 1, pm25, pm10, pEnc, tEnc);
+        }
 
-    auto encodePM10 = [](float pm) -> uint16_t {
-    if (pm < 0) return 0;
-    if (pm > 6553.5f) pm = 6553.5f;
-    return (uint16_t)(pm * 10.0f);   // 0.1 µg/m³ resolution
-    };
-
-    auto encodePM25 = [](float pm) -> uint16_t {
-        if (pm < 0) return 0;
-        if (pm > 6553.5f) pm = 6553.5f;
-        return (uint16_t)(pm * 10.0f);
-    };
-
-    // PM samples (reuse current reading for all 3)
-    float pm10_samples[3] = { s.pm10_0, s.pm10_0, s.pm10_0 };
-    float pm25_samples[3] = { s.pm2_5,  s.pm2_5,  s.pm2_5  };
-
-
-    BmpSample samples[3] = { s0, s7, s14 };
-
-    // Each sample: PM2.5(2) + PM10(2) + Pressure(2) + Temp(1)
-    for (int i = 0; i < 3; i++) {
-    uint8_t base = 26 + i * 7;
-
-    // PM2.5 and PM10 (use latest PM reading for all 3 timestamps, as you do now)
-    uint16_t pm25 = encodePM25(s.pm2_5);
-    uint16_t pm10 = encodePM10(s.pm10_0);
-
-    packUInt16(pm25, &packet[base + 0]);   // 26–27, 33–34, 40–41
-    packUInt16(pm10, &packet[base + 2]);   // 28–29, 35–36, 42–43
-
-    // Pressure from BMP history sample (0s/7s/14s)
-    int16_t pEnc = encodePressure(samples[i].pressure);
-    packInt16(pEnc, &packet[base + 4]);    // 30–31, 37–38, 44–45
-
-    // Temperature from BMP history sample
-    packet[base + 6] = encodeTemp(samples[i].temperature); // 32, 39, 46
+        uint8_t crcCalc = crc8_ccitt_07_msb(packet, 79);
+        Serial.printf("[DEBUG] CRC byte=0x%02X | CRC recalculated=0x%02X\n", packet[79], crcCalc);
     }
-
-
-
-    // ------------------------------------------------------
-    // Telemetry block (bytes 71–78)
-    // Altitudes (0s, 7s, 14s) + vertical velocity
-    // ------------------------------------------------------
-    uint8_t* tel = &packet[71];
-
-    auto encodeAltitude = [](float altM) -> uint16_t {
-        return (uint16_t)(altM * 10.0f);  // 0.1 m resolution
-    };
-
-    uint16_t a0  = encodeAltitude(s0.altitude);
-    uint16_t a7  = encodeAltitude(s7.altitude);
-    uint16_t a14 = encodeAltitude(s14.altitude);
-
-    packUInt16(a0,  &tel[0]);
-    packUInt16(a7,  &tel[2]);
-    packUInt16(a14, &tel[4]);
-
-    int16_t vel = (int16_t)(s0.verticalVelocity * 100.0f);
-    packInt16(vel, &tel[6]);
-
-    // CRC
-    packet[79] = crc8_ccitt(packet, 79);
-
-
-
-    // ------------------------------------------------------
-    // DEBUG PRINT — EXACT PACKET BEFORE TRANSMISSION
-    // ------------------------------------------------------
-
-    // ------------------------------------------------------
-    // DEBUG: Print actual values and encoded values
-    // ------------------------------------------------------
-    Serial.println("[DEBUG] Science payload values:");
-
-    for (int i = 0; i < 3; i++) {
-        Serial.printf("  Sample %d:\n", i);
-
-        Serial.printf("    Temp raw: %.2f C\n", samples[i].temperature);
-        Serial.printf("    Temp enc: %u\n", encodeTemp(samples[i].temperature));
-
-        int16_t pEnc = encodePressure(samples[i].pressure);
-        Serial.printf("    Pressure raw: %.2f Pa\n", samples[i].pressure);
-        Serial.printf("    Pressure enc: %d\n", pEnc);
-
-        Serial.printf("    Alt raw: %.2f m\n", samples[i].altitude);
-        Serial.printf("    Alt enc (telemetry): %u\n", encodeAltitude(samples[i].altitude));
-    }
-    Serial.println();
-
-
-    Serial.println("[DEBUG] Science packet (80 bytes):");
-    for (int i = 0; i < 80; i++) {
-        if (i % 16 == 0) Serial.println();
-        Serial.printf("%02X ", packet[i]);
-    }
-    Serial.println();
-    // ------------------------------------------------------
-
-    return send((const char*)packet, 80);
-}
-
-} // namespace lora
+} //namspace lora

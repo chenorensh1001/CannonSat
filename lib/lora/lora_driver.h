@@ -14,6 +14,8 @@ namespace lora {
     bool packetAvailable();
     bool send(const char* msg, size_t len);
     bool commandReceived();
+    bool receiveCommand(uint8_t& cmdByteOut);   // <-- ADD THIS
+
 
     // Build + send telemetry packet (GNSS + BMP altitude)
     bool sendTelemetry(const gnss::Location& loc, float bmpAltitude);
@@ -32,5 +34,11 @@ namespace lora {
 
     // Internal helper: build telemetry packet without sending
     void buildTelemetryPacket(uint8_t* packet, const gnss::Location& loc, float bmpAltitude);
+
+    // Internal helper: build science packet without sending
+    void buildSciencePacket(uint8_t* packet, const Sample& s);
+
+    // Debug: build + print science packet (raw + decoded)
+    void debugSciencePacket(const Sample& s);   
 
 }
