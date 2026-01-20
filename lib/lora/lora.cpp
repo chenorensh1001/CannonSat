@@ -98,15 +98,15 @@ namespace lora {
         LoRa.setSignalBandwidth(LORA_BANDWIDTH);
         LoRa.setCodingRate4(LORA_CODING_RATE);
         LoRa.endPacket(false); 
-        
-        // Serial.println("LoRa ready and listening...");
-        // Serial.println("=== LoRa CONFIG (probe) ===");
-        // Serial.print("Freq (Hz): "); Serial.println((uint32_t)LORA_FREQ);
-        // Serial.print("SF: "); Serial.println(LORA_SPREADING_FACTOR);
-        // Serial.print("BW: "); Serial.println(LORA_BANDWIDTH);
-        // Serial.print("CR4/: "); Serial.println(LORA_CODING_RATE);
-        // Serial.print("TX pwr: "); Serial.println(LORA_TX_POWER);
-        // Serial.println("===========================");
+
+        Serial.println("LoRa ready and listening...");
+        Serial.println("=== LoRa CONFIG (probe) ===");
+        Serial.print("Freq (Hz): "); Serial.println((uint32_t)LORA_FREQ);
+        Serial.print("SF: "); Serial.println(LORA_SPREADING_FACTOR);
+        Serial.print("BW: "); Serial.println(LORA_BANDWIDTH);
+        Serial.print("CR4/: "); Serial.println(LORA_CODING_RATE);
+        Serial.print("TX pwr: "); Serial.println(LORA_TX_POWER);
+
         LoRa.receive();
 
         return 0;
@@ -123,10 +123,16 @@ namespace lora {
     }
 
     bool packetAvailable() {
+        // Force RX mode every time (debug / robust)
+        LoRa.receive();
+
         if (pendingPacketSize > 0) return true;
 
         int size = LoRa.parsePacket();
         if (size > 0) {
+            Serial.print("[LORA] parsePacket size="); Serial.println(size);
+            Serial.print("[LORA] RSSI="); Serial.print(LoRa.packetRssi());
+            Serial.print(" SNR="); Serial.println(LoRa.packetSnr());
             pendingPacketSize = size;
             return true;
         }
