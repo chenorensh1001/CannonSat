@@ -97,7 +97,7 @@ namespace lora {
         LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
         LoRa.setSignalBandwidth(LORA_BANDWIDTH);
         LoRa.setCodingRate4(LORA_CODING_RATE);
-        LoRa.endPacket(false); 
+        // LoRa.endPacket(false); 
 
         // Serial.println("LoRa ready and listening...");
         // Serial.println("=== LoRa CONFIG (probe) ===");

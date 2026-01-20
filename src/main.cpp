@@ -352,7 +352,7 @@ void processSoundEvents() {
             f.close();
         }
 
-        Serial.println("!!! LOUD EVENT SAVED !!!");
+        // Serial.println("!!! LOUD EVENT SAVED !!!");
 
         isEventActive = false;
         eventMaxPeak = 0;
@@ -760,7 +760,7 @@ void handleDescent() {
                 delay(60); // >= 50 ms before responding
 
                 if (reqSci) {
-                    lora::sendScience(s);
+                    // lora::sendScience(s);
                 }
                 // if (reqTel) { lora::sendTelemetry(loc, b.altitude); }
 
@@ -786,6 +786,143 @@ void handleDescent() {
     }
 }
 
+// void handleDescent() {
+//     static uint32_t lastHzTick  = 0;
+//     static uint32_t lastPrint   = 0;
+//     static volatile bool cmdPending = false;
+//     static uint8_t pendingCmdByte = 0;
+//     static uint32_t pendingCmdMs = 0;
+
+//     // PM sampling timer + last valid reading cache
+//     static uint32_t lastPmRead = 0;
+//     static pm::Reading lastPmReading;
+
+//     uint32_t now = millis();
+
+//     // Time since entering DESCENT (used to enable touchdown detection)
+//     bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
+
+//     // HIGH-FREQUENCY POLLING (runs every loop)
+//     gnss::update();
+//     pm::update();
+//     processSoundEvents();  // 2 kHz .bin logging + event detection
+
+//     uint8_t cmd = 0;
+//     if (lora::receiveCommand(cmd)) {
+//     pendingCmdByte = cmd;
+//     pendingCmdMs = now;
+//     cmdPending = true;
+
+//     Serial.print("[CMD RX] cmdByte=0x");
+//     Serial.println(cmd, HEX);
+// }
+//     // 1 Hz block
+//     if (now - lastHzTick >= 1000) {
+//         lastHzTick = now;
+
+//         // Read sensors at 1 Hz
+//         bmp::Reading b = bmp::read();
+//         sensors_event_t accel, gyro, mag, temp;
+//         imu::read(accel, gyro, mag, temp);
+
+//         // PM SENSOR (2-second sampling)
+//         bool pmReady = false;
+//         if (now - lastPmRead >= 2000) {
+//             lastPmRead = now;
+
+//             pm::Reading pmr = pm::read();
+//             if (pmr.valid) {
+//                 lastPmReading = pmr;
+//                 pmReady = true;
+//             } else {
+//                 Serial.println("[DESCENT] PM read failed");
+//             }
+//         }
+
+//         if (!b.valid) {
+//             Serial.println("[DESCENT] BMP read failed");
+//             return;
+//         }
+
+//         // Store BMP history (1 Hz)
+//         bmpHistory[bmpHistoryIndex] = { now, b.temperature, b.pressure, b.altitude };
+//         bmpHistoryIndex = (bmpHistoryIndex + 1) % BMP_HISTORY_SIZE;
+
+//         // GNSS used at 1 Hz (parsing is continuous above)
+//         gnss::Location loc = getEnrichedLocation(b.altitude);
+
+//         // Build sample (1 Hz)
+//         Sample s;
+//         s.timestampMs = loc.timestamp;
+//         s.temperature = b.temperature;
+//         s.pressure    = b.pressure;
+//         s.altitude    = b.altitude;
+
+//         if (pmReady) {
+//             s.pm2_5  = lastPmReading.pm2_5;
+//             s.pm10_0 = lastPmReading.pm10_0;
+//         } else {
+//             s.pm2_5  = lastPmReading.valid ? lastPmReading.pm2_5  : -1;
+//             s.pm10_0 = lastPmReading.valid ? lastPmReading.pm10_0 : -1;
+//         }
+
+//         flash_storeSample(s);
+
+//         // DEBUG: build + print science packet every 20 seconds
+// //         static uint32_t lastDbg = 0;
+// //         if (now - lastDbg >= 20000) {
+// //         lastDbg = now;
+// //         lora::debugSciencePacket(s);   // prints RAW + decoded
+// // }
+
+//         // Touchdown detection (only after minimum descent time)
+//         // if (descentTimeOk && detectTouchdown(b.altitude)) {
+//             // Serial.println("[DESCENT] TOUCHDOWN detected");
+
+//             // Finalize microphone logging
+//             // mic::stop();
+
+//             // status = Status::TOUCHDOWN;
+//             // return;
+//         // }
+
+//         // LoRa / SD flush handling (1 Hz)
+//         uint8_t cmdByte = 0;
+//         bool command = lora::receiveCommand(cmdByte);
+
+//         if (cmdPending) {
+//             cmdPending = false;
+//             uint8_t cmdByte = pendingCmdByte;
+
+//             uint8_t team = cmdByte & 0x0F;
+//             if (team != (TEAM_ID & 0x0F)) {
+//                 Serial.print("[CMD] Not for us, team=");
+//                 Serial.println(team);
+//             } else {
+//                 bool reqSci = (cmdByte & (1u << 4));
+//                 bool reqTel = (cmdByte & (1u << 5));
+
+//                 delay(60); // >= 50 ms before responding (spec)
+
+//                 if (reqSci) lora::sendScience(s);
+//                 // if (reqTel) lora::sendTelemetry(loc, b.altitude);
+
+//                 lastCommandMs = now;
+//                 flash_flushToSD();
+//             }
+//         }
+                
+//             }
+
+//             // 1 Hz debug print (rich version + simple tick)
+//             if (now - lastPrint >= 1000) {
+//                 lastPrint = now;
+//                 Serial.print("[DESCENT] tick | dt=");
+//                 Serial.print(descentStartMs ? (now - descentStartMs) : 0);
+//                 Serial.print(" ms | touchdown_enabled=");
+//                 Serial.println(descentTimeOk ? "YES" : "NO");
+//             }
+// }
 
 //TOUCHDOWN//
 void handleTouchdown() {
