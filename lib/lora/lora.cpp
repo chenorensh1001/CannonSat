@@ -85,6 +85,7 @@ namespace lora {
         SPI1.setSCK(27);
         SPI1.setMOSI(26);
         SPI1.setMISO(39);
+        SPI1.begin();
         LoRa.setSPI(SPI1);
         LoRa.setPins(RFM95_CS, RFM95_RST, RFM95_INT);  // CS, RST, DIO0
 
@@ -160,26 +161,30 @@ namespace lora {
     }
 
     bool receive(char* outBuf, size_t& outLen) {
-        int packetSize = pendingPacketSize;
-        if (packetSize == 0) {
-            packetSize = LoRa.parsePacket();
-        }
-        if (packetSize == 0) return false;
+    int packetSize = pendingPacketSize;
+    if (packetSize == 0) packetSize = LoRa.parsePacket();
+    if (packetSize <= 0) return false;
 
-        if ((size_t)packetSize > outLen) {
-            packetSize = outLen; 
-        }
+    size_t toCopy = (size_t)packetSize;
+    if (toCopy > outLen) toCopy = outLen;
 
-        for (int i = 0; i < packetSize; i++) {
-            int byteReceived = LoRa.read();
-            if (byteReceived == -1) break;
-            outBuf[i] = (char)byteReceived;
-        }
-
-        outLen = packetSize;
-        pendingPacketSize = 0;
-        return true;
+    // Read full packet; copy what fits, discard the rest
+    size_t i = 0;
+    for (; i < (size_t)packetSize; i++) {
+        int b = LoRa.read();
+        if (b < 0) break;
+        if (i < toCopy) outBuf[i] = (char)b;
+        // else: discard
     }
+
+    outLen = (size_t)packetSize;      // report REAL packet length
+    pendingPacketSize = 0;
+
+    // back to RX
+    LoRa.receive();
+    return true;
+}
+
 
     //receivecommand//
     bool receiveCommand(uint8_t& cmdByteOut) {

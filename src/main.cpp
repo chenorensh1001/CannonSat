@@ -671,6 +671,38 @@ void handleDescent() {
     pm::update();
     processSoundEvents();  // 2 kHz .bin logging + event detection
 
+    uint8_t cmdByte = 0;
+        bool command = lora::receiveCommand(cmdByte);
+
+        if (command) {
+            Serial.print("[CMD] cmdByte=0x");
+            Serial.println(cmdByte, HEX);
+
+            uint8_t team = cmdByte & 0x0F;
+            if (team != (TEAM_ID & 0x0F)) {
+                Serial.print("[CMD] Not for us, team=");
+                Serial.println(team);
+            } else {
+                bool reqSci = (cmdByte & (1u << 4));
+                bool reqTel = (cmdByte & (1u << 5));
+
+                delay(60); // >= 50 ms before responding
+
+                if (reqSci) {
+                    // lora::sendScience(s);
+                }
+                // if (reqTel) { lora::sendTelemetry(loc, b.altitude); }
+
+                lastCommandMs = now;
+                flash_flushToSD();
+            }
+        } else {
+            if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
+                flash_flushToSD();
+                lastCommandMs = now;
+            }
+        }
+
     // 1 Hz block
     if (now - lastHzTick >= 1000) {
         lastHzTick = now;
@@ -742,7 +774,7 @@ void handleDescent() {
         // }
 
         // LoRa / SD flush handling (1 Hz)
-        uint8_t cmdByte = 0;
+        /*uint8_t cmdByte = 0;
         bool command = lora::receiveCommand(cmdByte);
 
         if (command) {
@@ -772,7 +804,7 @@ void handleDescent() {
                 flash_flushToSD();
                 lastCommandMs = now;
             }
-        }
+        }*/
         
     }
 
