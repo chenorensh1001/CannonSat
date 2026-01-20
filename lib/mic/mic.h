@@ -3,7 +3,7 @@
 
 namespace mic {
 
-    constexpr size_t DEFAULT_BUFFER_SIZE = 512; // samples per circular buffer
+    constexpr size_t DEFAULT_BUFFER_SIZE = 16384; // samples per circular buffer
 
     /**
      * @brief Initialize the I²S microphone system

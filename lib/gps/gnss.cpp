@@ -68,4 +68,37 @@ void end() {
     GNSS.end();
 }
 
+
+// // void setup() {
+// //     Serial.begin(9600);
+// //     Serial.println("=== GNSS PASSTHROUGH TEST ===");
+
+// //     Serial1.begin(9600);   // try 38400 later if needed
+// // }
+
+// // void loop() {
+// //     // Serial.println("=== GNSS PASSTHROUGH TEST ===");
+// //     while (Serial1.available()) {
+// //         Serial.write(Serial1.read());
+// //     }
+// // }
+
+
+// void setup() {
+//     Serial.begin(115200);   // USB to PC
+//     Serial1.begin(9600);    // GNSS baud rate (check your module)
+// }
+
+// void loop() {
+//     // PC → GNSS
+//     if (Serial.available()) {
+//         Serial1.write(Serial.read());
+//     }
+
+//     // GNSS → PC
+//     if (Serial1.available()) {
+//         Serial.write(Serial1.read());
+//     }
+// }
+
 }

@@ -10,6 +10,8 @@
 #include "mic.h"
 #include "sd_driver.h"
 #include "pm.h"
+#include "interface.h"
+#include "linear_actuator.h"
 
 // Path to SD log file
 const char* SD_LOG_PATH = "/logs/descent.txt";
@@ -27,19 +29,20 @@ enum class Status {
     TOUCHDOWN
 };
 
-Status status = Status::DESCENT;
+Status status = Status::ACTIVE;
 
 
 //GLOBAL VATIABLES AND THRESHOLDS//
 // Timing
 unsigned long armTimeMs = 0; // logging the time the armed button was pressed
 unsigned long lastCommandMs = 0; // logging the exact time the command packet was last received
-const unsigned long MIN_FREEFALL_TIME_MS = 3000;    // example: 3 seconds after arming
+const unsigned long MIN_FREEFALL_TIME_MS = 1000;    // example: 3 seconds after arming
 const unsigned long COMMAND_TIMEOUT_MS   = 20000;   // 40 seconds
 static bool gnssEverValid = false; // variables for syncing the teensy internal clock and the GNSS
 static uint32_t lastGnssUnix = 0; // variables for syncing the teensy internal clock and the GNSS
 static uint32_t lastGnssMillis = 0; // variables for syncing the teensy internal clock and the GNSS
 unsigned long activeStartMs = 0; // variables for syncing the teensy internal clock and the GNSS
+bool actuatorDeployed = false;
 
 
 // Freefall detection counters
@@ -50,7 +53,7 @@ int altitudeDropCount    = 0;
 const float FREEFALL_ACCEL_THRESHOLD = 11.0f;   // m/s², magnitude below this = near freefall
 const float ALTITUDE_DROP_MIN        = 0.02f;   // meters drop between samples - set to 1 m between samples (which are sampled at 0.05 seconds)
 const int   FREEFALL_ACCEL_SAMPLES   = 5;     // consecutive samples detect freefalll
-const int   ALTITUDE_DROP_SAMPLES    = 5;      // consecutive
+const int   ALTITUDE_DROP_SAMPLES    = 3;      // consecutive
 
 // For altitude trend
 float lastAltitude = 0.0f;
@@ -64,24 +67,6 @@ constexpr int BMP_HISTORY_SIZE = 200; // 20 seconds at 10 Hz
 BmpSample bmpHistory[BMP_HISTORY_SIZE];
 int bmpHistoryIndex = 0;
 
-//PIN DEFINITIONS// - WILL BE RELEVANT ONCE WE HAVE LEDS
-const int PIN_ARM_BUTTON = 2;   // active-low button
-const int PIN_LED_SYSTEM_ON = 12;   // LED 1
-const int PIN_LED_ARMED     = 30;   // LED 2
-const int PIN_LED_SPARE     = 29;   // LED 3 (unused)
-
-
-//LED UPDATES - WILL BE RELEVANT ONCE WE HAVE LEDS
-
-void updateStatusLeds() {
-    // SYSTEM ON LED stays ON forever
-    digitalWrite(PIN_LED_SYSTEM_ON, HIGH);
-
-    // ARMED LED stays ON once armed (latched)
-    if (status == Status::ARMED) {
-        digitalWrite(PIN_LED_ARMED, HIGH);
-    }
-}
 
 //HELPER FUNCTIONS
     //TIMESTAMPING//
@@ -160,53 +145,47 @@ void flash_storeSample(const Sample& s) {
         Serial.print(" Pa, Alt=");
         Serial.print(s.altitude);
         Serial.println(" m");
+        Serial.print(", PM10=");
+        Serial.print(s.pm10_0);
+        Serial.print(" ug/m3, PM2.5=");
+        Serial.print(s.pm2_5);
+        Serial.println(" ug/m3");
+
+
     } else {
         Serial.println("WARNING: Sample buffer FULL — cannot store more samples!");
     }
 }
 
 
-bool detectTouchdown(const sensors_event_t &accel, float currentAltitude) {
-    static float lastAltitude = NAN;
-    static int stableAltCount = 0;
-    static bool impactDetected = false;
+bool detectTouchdown(float currentAltitude) {
+    static float lastAlt = NAN;
+    static uint32_t stableSince = 0;
 
-    const float IMPACT_THRESHOLD = 3.0f;      // m/s² change from 1g
-    const float ALT_STABLE_THRESHOLD = 0.5f;  // meters
-    const int ALT_STABLE_REQUIRED = 10;       // consecutive samples
+    const float ALT_STABLE_BAND = 0.5f;      // meters (tune)
+    const uint32_t STABLE_TIME_MS = 3000;    // 3 seconds (tune)
 
-    // --- Compute acceleration magnitude ---
-    float ax = accel.acceleration.x;
-    float ay = accel.acceleration.y;
-    float az = accel.acceleration.z;
-    float accelMag = sqrtf(ax*ax + ay*ay + az*az);
+    uint32_t now = millis();
 
-    // --- Detect impact ---
-    float deltaAccel = fabs(accelMag - 9.81f);
-    if (deltaAccel > IMPACT_THRESHOLD) {
-        impactDetected = true;
+    if (isnan(lastAlt)) {
+        lastAlt = currentAltitude;
+        stableSince = now;
+        return false;
     }
 
-    // --- Track altitude stability ---
-    if (!isnan(lastAltitude)) {
-        if (fabs(currentAltitude - lastAltitude) < ALT_STABLE_THRESHOLD) {
-            stableAltCount++;
-        } else {
-            stableAltCount = 0;
-        }
-    }
-    lastAltitude = currentAltitude;
+    float dAlt = fabsf(currentAltitude - lastAlt);
 
-    // --- Touchdown condition ---
-    if (impactDetected && stableAltCount >= ALT_STABLE_REQUIRED) {
-        return true;
+    if (dAlt <= ALT_STABLE_BAND) {
+        // still stable
+        if (now - stableSince >= STABLE_TIME_MS) return true;
+    } else {
+        // not stable -> reset timer
+        stableSince = now;
+        lastAlt = currentAltitude;
     }
 
     return false;
 }
-
-
-
 //READ SD CARD FUNCTION
 void dumpSdFile(const char* filename) {
     Serial.print("Opening file: ");
@@ -322,61 +301,53 @@ void debugPrintGnss(const gnss::Location& loc) {
 //SETUP//
 
 void setup() {
-  Serial.begin(9600);
-  Serial1.begin(9600);
-//   delay(2000)
-    lastCommandMs = millis();
+    Serial.begin(9600);
+    Serial1.begin(9600);
+    interface::setup();
+    bool ok = true;
+    gnss::setup();            // if it returns int, change to: ok &= (gnss::setup() == 0);
+    imu::setup();             // same
+    ok &= (bmp::setup() == 0);
+    pm::setup();              // same
+    actuator::setup();
+    actuator::undeploy();
+    mic:setup(16384)
 
-  pinMode(PIN_ARM_BUTTON, INPUT_PULLUP);
-  pinMode(PIN_LED_SYSTEM_ON, OUTPUT);
-  pinMode(PIN_LED_ARMED, OUTPUT);
-  pinMode(PIN_LED_SPARE, OUTPUT); // optional
+    if (!ok) {
+        // ERROR: at least one setup failed -> blink forever
+        interface::startSystemBlinking();
+        while (1) {
+            interface::serviceBlink();   // keep blinking
+            delay(10);
+        }
+    }
 
-  gnss::setup();
-  imu::setup();
-  bmp::setup();
-  pm::setup();
-
-    activeStartMs = millis();
-    digitalWrite(PIN_LED_SYSTEM_ON, HIGH);   // simulate system-on LED
-
-
-  Serial.println("Setup complete.");
+    // All good -> steady ON
+    interface::stopSystemBlinking();   // this sets ACTIVE LED ON in your implementation
 }
-
 
 
 //ACTIVE// - without any LEDS or buttons, they will have to be added once arrived. I have a draft for the function that should be implemented when they arrive under this one
 void handleActive() {
-    Serial.println("[ACTIVE] start");
+    static bool armedLatched = false;   // prevents re-arming logic from running again
+
     unsigned long now = millis();
 
-    // Automatically transition to ARMED after a short delay
-    if (now - activeStartMs > 2000) {   // 2 seconds
-        Serial.println("[ACTIVE] Auto-transition → ARMED");
+    // Always update interface (debounce + any LED service you might have)
+    interface::update();
+
+    // If ARM button pressed -> go ARMED and turn on yellow LED
+    if (!armedLatched && interface::armPressed()) {
+        armedLatched = true;
+
+        Serial.println("[ACTIVE] ARM button pressed -> ARMED");
+        interface::setArmedLed(true);   // yellow ON
+
         status = Status::ARMED;
         armTimeMs = now;                // start ARMED timer
-        updateStatusLeds();             // safe even without LEDs
+        return;
     }
-
-    delay(50); // small delay to avoid spamming
 }
-
-// //ACTIVE//
-// bool isArmButtonPressed() {
-//     // Assuming active-low button
-//     return digitalRead(PIN_ARM_BUTTON) == LOW;
-// }
-
-// void handleActive() {
-//     // In ACTIVE: wait for arm button
-//     if (isArmButtonPressed()) {
-//         Serial.println("Arm button pressed → ARMED");
-//         status = Status::ARMED;
-//         armTimeMs = millis();
-//         updateStatusLeds();
-//     }
-// }
 
 
 //ARMED//
@@ -384,49 +355,121 @@ void handleActive() {
 void handleArmed() {
     unsigned long now = millis();
 
+    static unsigned long lastTickPrint = 0;
+    if (now - lastTickPrint > 1000) {   // 1 Hz
+        lastTickPrint = now;
+        Serial.println("TICK: ARMED");
+    }
+
     // Read sensors
     sensors_event_t accel, gyro, mag, temp;
     imu::read(accel, gyro, mag, temp);
     bmp::Reading b = bmp::read();
 
-    // Freefall accel condition
+    // Compute accel magnitude
     float aMag = vec3_mag(accel.acceleration.x,
                           accel.acceleration.y,
                           accel.acceleration.z);
-        //Play with the freefall parameter, right now set to 2 m/s^2
+
+    // ---------------- DEBUG: ICM + BMP output ----------------
+    static unsigned long lastPrint = 0;
+    if (now - lastPrint > 500) {   // print at 2 Hz
+        lastPrint = now;
+
+        // IMU
+        Serial.print("ACC [m/s^2]  X=");
+        Serial.print(accel.acceleration.x, 3);
+        Serial.print("  Y=");
+        Serial.print(accel.acceleration.y, 3);
+        Serial.print("  Z=");
+        Serial.print(accel.acceleration.z, 3);
+        Serial.print("  |a|=");
+        Serial.print(aMag, 3);
+
+        // BMP
+        if (b.valid) {
+            Serial.print("  |  ALT=");
+            Serial.print(b.altitude, 2);
+            Serial.print(" m  P=");
+            Serial.print(b.pressure / 100.0, 2); // Pa → hPa
+            Serial.print(" hPa  T=");
+            Serial.print(b.temperature, 2);
+            Serial.println(" C");
+        } else {
+            Serial.println("  |  BMP INVALID");
+        }
+    }
+    // ---------------------------------------------------------
+
+    // Freefall accel condition
     if (aMag < FREEFALL_ACCEL_THRESHOLD) {
         freefallAccelCount++;
     } else {
         freefallAccelCount = 0;
     }
 
-    // Altitude drop condition
-    if (b.valid) {
-        if (hasLastAltitude) {
-            float deltaAlt = lastAltitude - b.altitude; // positive if we are going down
-            if (deltaAlt > ALTITUDE_DROP_MIN) {
-                altitudeDropCount++;
-            } else {
-                altitudeDropCount = 0;
-            }
-        }
-        lastAltitude = b.altitude;
-        hasLastAltitude = true;
-    }
+    // // Altitude drop condition
+    // if (b.valid) {
+    //     if (hasLastAltitude) {
+    //         float deltaAlt = lastAltitude - b.altitude; // positive if descending
+    //         if (deltaAlt > ALTITUDE_DROP_MIN) {
+    //             altitudeDropCount++;
+    //         } else {
+    //             altitudeDropCount = 0;
+    //         }
+    //     }
+    //     lastAltitude = b.altitude;
+    //     hasLastAltitude = true;
+    // }
 
-    bool accelOk  = (freefallAccelCount >= FREEFALL_ACCEL_SAMPLES);
-    bool altOk    = (altitudeDropCount  >= ALTITUDE_DROP_SAMPLES);
-    bool timeOk   = (now - armTimeMs >= MIN_FREEFALL_TIME_MS);
+    bool accelOk = (freefallAccelCount >= FREEFALL_ACCEL_SAMPLES);
+    bool altOk   = true ; //(altitudeDropCount  >= ALTITUDE_DROP_SAMPLES);
+    bool timeOk  = (now - armTimeMs >= MIN_FREEFALL_TIME_MS);
 
     if (accelOk && altOk && timeOk) {
-        Serial.println("Freefall detected → DESCENT"); //ADD LINEAR ACTUATOR HERE
+        Serial.println("Freefall detected → DESCENT");
+        actuator::trigger(); // deploy
+        Serial.println("ACTUATOR DE");
         status = Status::DESCENT;
         freefallAccelCount = 0;
         altitudeDropCount = 0;
         lastCommandMs = now;
     }
 
-    delay(50); // sampling rate during ARMED, adjust
+        // ---------------- DEBUG: Deployment conditions ----------------
+    static unsigned long lastCondPrint = 0;
+    if (now - lastCondPrint > 500) {   // 2 Hz, readable
+        lastCondPrint = now;
+
+        Serial.print("DEPLOY CHECK | ");
+
+        Serial.print("ACC=");
+        Serial.print(accelOk ? "OK" : "NO");
+        Serial.print(" (");
+        Serial.print(freefallAccelCount);
+        Serial.print("/");
+        Serial.print(FREEFALL_ACCEL_SAMPLES);
+        Serial.print(") | ");
+
+        Serial.print("ALT=");
+        Serial.print(altOk ? "OK" : "NO");
+        Serial.print(" (");
+        Serial.print(altitudeDropCount);
+        Serial.print("/");
+        Serial.print(ALTITUDE_DROP_SAMPLES);
+        Serial.print(") | ");
+
+        Serial.print("TIME=");
+        Serial.print(timeOk ? "OK" : "NO");
+        Serial.print(" (");
+        Serial.print(now - armTimeMs);
+        Serial.print(" ms)");
+
+        Serial.println();
+    }
+    // ---------------------------------------------------------------
+
+    // delay(50); // sampling rate during ARMED
 }
 
 //DESCENT//
@@ -510,7 +553,7 @@ void handleDescent() {
         flash_storeSample(s);
 
         // Touchdown detection (1 Hz IMU + BMP)
-        if (detectTouchdown(accel, b.altitude)) {
+        if (detectTouchdown(b.altitude)) {
             Serial.println("[DESCENT] TOUCHDOWN detected");
             status = Status::TOUCHDOWN;
             return;
@@ -595,6 +638,31 @@ void loop() {
     for (int i = 0; i < 50; i++) {
         gnss::update();
     }
+
+    actuator::update();
+    interface::update();
+
+    // RESET works from any state
+    if (interface::resetPressed()) {
+        status = Status::ACTIVE;
+        interface::setArmedLed(false);
+        freefallAccelCount = 0;
+        altitudeDropCount = 0;
+        hasLastAltitude = false;
+        lastAltitude = 0;
+        armTimeMs = millis();
+        actuatorDeployed = false;  // optional depending on your mission rules
+
+        Serial.println("RESET → ACTIVE");
+    }
+
+    // ARM button only works from ACTIVE
+    if (interface::armPressed() && status == Status::ACTIVE) {
+        status = Status::ARMED;
+        interface::setArmedLed(true);
+        Serial.println("ACTIVE → ARMED");
+    }
+
 // Status
     switch (status) {
         case Status::ACTIVE:    handleActive();    break;
@@ -608,36 +676,3 @@ void loop() {
 
 
 
-
-
-// // void setup() {
-// //     Serial.begin(9600);
-// //     Serial.println("=== GNSS PASSTHROUGH TEST ===");
-
-// //     Serial1.begin(9600);   // try 38400 later if needed
-// // }
-
-// // void loop() {
-// //     // Serial.println("=== GNSS PASSTHROUGH TEST ===");
-// //     while (Serial1.available()) {
-// //         Serial.write(Serial1.read());
-// //     }
-// // }
-
-
-// void setup() {
-//     Serial.begin(115200);   // USB to PC
-//     Serial1.begin(9600);    // GNSS baud rate (check your module)
-// }
-
-// void loop() {
-//     // PC → GNSS
-//     if (Serial.available()) {
-//         Serial1.write(Serial.read());
-//     }
-
-//     // GNSS → PC
-//     if (Serial1.available()) {
-//         Serial.write(Serial1.read());
-//     }
-// }
