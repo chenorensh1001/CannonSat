@@ -152,22 +152,22 @@ void flash_storeSample(const Sample& s) {
     if (sampleBufferIndex < SAMPLE_BUFFER_SIZE) {
         sampleBuffer[sampleBufferIndex++] = s;
 
-        Serial.print("Buffered sample ");
-        Serial.print(sampleBufferIndex);
-        Serial.print(": t=");
-        Serial.print(s.timestampMs);
-        Serial.print(" ms, T=");
-        Serial.print(s.temperature);
-        Serial.print(" C, P=");
-        Serial.print(s.pressure);
-        Serial.print(" Pa, Alt=");
-        Serial.print(s.altitude);
-        Serial.println(" m");
-        Serial.print(", PM10=");
-        Serial.print(s.pm10_0);
-        Serial.print(" ug/m3, PM2.5=");
-        Serial.print(s.pm2_5);
-        Serial.println(" ug/m3");
+        // Serial.print("Buffered sample ");
+        // Serial.print(sampleBufferIndex);
+        // Serial.print(": t=");
+        // Serial.print(s.timestampMs);
+        // Serial.print(" ms, T=");
+        // Serial.print(s.temperature);
+        // Serial.print(" C, P=");
+        // Serial.print(s.pressure);
+        // Serial.print(" Pa, Alt=");
+        // Serial.print(s.altitude);
+        // Serial.println(" m");
+        // Serial.print(", PM10=");
+        // Serial.print(s.pm10_0);
+        // Serial.print(" ug/m3, PM2.5=");
+        // Serial.print(s.pm2_5);
+        // Serial.println(" ug/m3");
 
 
     } else {
@@ -275,11 +275,11 @@ void processSoundEvents() {
             uint16_t absVal = (uint16_t)abs(sample);
 
             // 1) RAW 2kHz LOGGING (downsample from 44.1kHz -> ~2kHz)
-            downsampleCounter++;
-            if (downsampleCounter >= DOWNSAMPLE_FACTOR) {
-                if (rawFile) rawFile.write((const uint8_t*)&sample, sizeof(int16_t));
-                downsampleCounter = 0;
-            }
+            // downsampleCounter++;
+            // if (downsampleCounter >= DOWNSAMPLE_FACTOR) {
+            //     if (rawFile) rawFile.write((const uint8_t*)&sample, sizeof(int16_t));
+            //     downsampleCounter = 0;
+            // }
 
             // 2) PEAK TRACKING (for debug + event metadata)
             if ((int16_t)absVal > eventMaxPeak) eventMaxPeak = (int16_t)absVal;
@@ -789,7 +789,9 @@ void handleDescent() {
 // void handleDescent() {
 //     static uint32_t lastHzTick  = 0;
 //     static uint32_t lastPrint   = 0;
-//     static volatile bool cmdPending = false;
+
+//     // Command mailbox (set in fast loop, consumed in 1 Hz block)
+//     static bool cmdPending = false;
 //     static uint8_t pendingCmdByte = 0;
 //     static uint32_t pendingCmdMs = 0;
 
@@ -799,28 +801,28 @@ void handleDescent() {
 
 //     uint32_t now = millis();
 
-//     // Time since entering DESCENT (used to enable touchdown detection)
 //     bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
 
 //     // HIGH-FREQUENCY POLLING (runs every loop)
 //     gnss::update();
 //     pm::update();
-//     processSoundEvents();  // 2 kHz .bin logging + event detection
+//     processSoundEvents();
 
+//     // FAST LoRa command polling (runs every loop)
 //     uint8_t cmd = 0;
 //     if (lora::receiveCommand(cmd)) {
-//     pendingCmdByte = cmd;
-//     pendingCmdMs = now;
-//     cmdPending = true;
+//         pendingCmdByte = cmd;
+//         pendingCmdMs = now;
+//         cmdPending = true;
 
-//     Serial.print("[CMD RX] cmdByte=0x");
-//     Serial.println(cmd, HEX);
-// }
+//         Serial.print("[CMD RX] cmdByte=0x");
+//         Serial.println(cmd, HEX);
+//     }
+
 //     // 1 Hz block
 //     if (now - lastHzTick >= 1000) {
 //         lastHzTick = now;
 
-//         // Read sensors at 1 Hz
 //         bmp::Reading b = bmp::read();
 //         sensors_event_t accel, gyro, mag, temp;
 //         imu::read(accel, gyro, mag, temp);
@@ -844,14 +846,11 @@ void handleDescent() {
 //             return;
 //         }
 
-//         // Store BMP history (1 Hz)
 //         bmpHistory[bmpHistoryIndex] = { now, b.temperature, b.pressure, b.altitude };
 //         bmpHistoryIndex = (bmpHistoryIndex + 1) % BMP_HISTORY_SIZE;
 
-//         // GNSS used at 1 Hz (parsing is continuous above)
 //         gnss::Location loc = getEnrichedLocation(b.altitude);
 
-//         // Build sample (1 Hz)
 //         Sample s;
 //         s.timestampMs = loc.timestamp;
 //         s.temperature = b.temperature;
@@ -868,28 +867,7 @@ void handleDescent() {
 
 //         flash_storeSample(s);
 
-//         // DEBUG: build + print science packet every 20 seconds
-// //         static uint32_t lastDbg = 0;
-// //         if (now - lastDbg >= 20000) {
-// //         lastDbg = now;
-// //         lora::debugSciencePacket(s);   // prints RAW + decoded
-// // }
-
-//         // Touchdown detection (only after minimum descent time)
-//         // if (descentTimeOk && detectTouchdown(b.altitude)) {
-//             // Serial.println("[DESCENT] TOUCHDOWN detected");
-
-//             // Finalize microphone logging
-//             // mic::stop();
-
-//             // status = Status::TOUCHDOWN;
-//             // return;
-//         // }
-
-//         // LoRa / SD flush handling (1 Hz)
-//         uint8_t cmdByte = 0;
-//         bool command = lora::receiveCommand(cmdByte);
-
+//         // Consume command (if one arrived since last second)
 //         if (cmdPending) {
 //             cmdPending = false;
 //             uint8_t cmdByte = pendingCmdByte;
@@ -901,8 +879,9 @@ void handleDescent() {
 //             } else {
 //                 bool reqSci = (cmdByte & (1u << 4));
 //                 bool reqTel = (cmdByte & (1u << 5));
+//                 (void)reqTel; // silence warning until you use it
 
-//                 delay(60); // >= 50 ms before responding (spec)
+//                 delay(60);
 
 //                 if (reqSci) lora::sendScience(s);
 //                 // if (reqTel) lora::sendTelemetry(loc, b.altitude);
@@ -910,19 +889,24 @@ void handleDescent() {
 //                 lastCommandMs = now;
 //                 flash_flushToSD();
 //             }
+//         } else {
+//             if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
+//                 flash_flushToSD();
+//                 lastCommandMs = now;
+//             }
 //         }
-                
-//             }
+//     }
 
-//             // 1 Hz debug print (rich version + simple tick)
-//             if (now - lastPrint >= 1000) {
-//                 lastPrint = now;
-//                 Serial.print("[DESCENT] tick | dt=");
-//                 Serial.print(descentStartMs ? (now - descentStartMs) : 0);
-//                 Serial.print(" ms | touchdown_enabled=");
-//                 Serial.println(descentTimeOk ? "YES" : "NO");
-//             }
+//     // 1 Hz debug print
+//     if (now - lastPrint >= 1000) {
+//         lastPrint = now;
+//         Serial.print("[DESCENT] tick | dt=");
+//         Serial.print(descentStartMs ? (now - descentStartMs) : 0);
+//         Serial.print(" ms | touchdown_enabled=");
+//         Serial.println(descentTimeOk ? "YES" : "NO");
+//     }
 // }
+
 
 //TOUCHDOWN//
 void handleTouchdown() {

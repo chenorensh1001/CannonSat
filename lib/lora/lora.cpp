@@ -124,7 +124,7 @@ namespace lora {
 
     bool packetAvailable() {
         // Force RX mode every time (debug / robust)
-        LoRa.receive();
+        // LoRa.receive();
 
         if (pendingPacketSize > 0) return true;
 
@@ -183,11 +183,11 @@ namespace lora {
 
     //receivecommand//
     bool receiveCommand(uint8_t& cmdByteOut) {
-            Serial.println("receiveCommand called");
+            // Serial.println("receiveCommand called");
             if (!packetAvailable()) return false;
             Serial.println("yes1");
 
-            char buf[8];
+            char buf[255];
             size_t len = sizeof(buf);
 
             // This uses your internal lora::receive() (currently in lora.cpp)
@@ -196,7 +196,7 @@ namespace lora {
             // Debug print (very useful while testing)
             Serial.print("[RX] len="); Serial.print(len);
             Serial.print(" bytes: ");
-            LoRa.receive();
+            // LoRa.receive();
             for (size_t i = 0; i < len; i++) {
                 uint8_t b = (uint8_t)buf[i];
                 if (b < 0x10) Serial.print("0");

@@ -121,13 +121,13 @@ static Reading parsePacket(const uint8_t* packet) {
     r.valid = true;
     
     // // Debug output
-    // Serial.print("PM: PM1.0=");
-    // Serial.print(r.pm1_0);
-    // Serial.print(" PM2.5=");
-    // Serial.print(r.pm2_5);
-    // Serial.print(" PM10=");
-    // Serial.print(r.pm10_0);
-    // Serial.println(" µg/m³");
+    Serial.print("PM: PM1.0=");
+    Serial.print(r.pm1_0);
+    Serial.print(" PM2.5=");
+    Serial.print(r.pm2_5);
+    Serial.print(" PM10=");
+    Serial.print(r.pm10_0);
+    Serial.println(" µg/m³");
     
     return r;
 }

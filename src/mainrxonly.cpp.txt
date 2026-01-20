@@ -1,0 +1,80 @@
+// main.cpp — RX-only, minimal, does NOT spam LoRa.receive()
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <LoRa.h>
+#include "config.h"
+#include "lora_driver.h"
+
+static uint32_t pkts = 0, bytes = 0;
+static uint32_t lastRxMs = 0, lastStatsMs = 0;
+
+static void printHex(const uint8_t* d, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    if (d[i] < 0x10) Serial.print('0');
+    Serial.print(d[i], HEX);
+    Serial.print(' ');
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  delay(1000);
+  Serial.println("\n=== RX-ONLY (direct parsePacket, no receive spam) ===");
+
+  // Make sure SPI1 is started
+  SPI1.setSCK(27);
+  SPI1.setMOSI(26);
+  SPI1.setMISO(39);
+  SPI1.begin();
+
+  if (lora::setup() != 0) {
+    Serial.println("LoRa setup failed");
+    while (1) delay(1000);
+  }
+
+  // Put radio in RX ONCE
+  LoRa.receive();
+
+  lastRxMs = millis();
+  lastStatsMs = millis();
+  Serial.println("Listening...");
+}
+
+void loop() {
+  uint32_t now = millis();
+
+  if (now - lastStatsMs >= 1000) {
+    lastStatsMs = now;
+    Serial.print("[STATS] pkts="); Serial.print(pkts);
+    Serial.print(" bytes="); Serial.print(bytes);
+    Serial.print(" lastGapMs="); Serial.println(now - lastRxMs);
+  }
+
+  int packetSize = LoRa.parsePacket();
+  if (packetSize <= 0) return;
+
+  // Read packet
+  uint8_t buf[255];
+  int n = 0;
+  while (LoRa.available() && n < (int)sizeof(buf)) {
+    buf[n++] = (uint8_t)LoRa.read();
+  }
+
+  pkts++;
+  bytes += (uint32_t)n;
+  uint32_t gap = now - lastRxMs;
+  lastRxMs = now;
+
+  Serial.print("[RX] #"); Serial.print(pkts);
+  Serial.print(" len="); Serial.print(n);
+  Serial.print(" gapMs="); Serial.print(gap);
+  Serial.print(" RSSI="); Serial.print(LoRa.packetRssi());
+  Serial.print(" SNR="); Serial.print(LoRa.packetSnr(), 1);
+  Serial.print(" data: ");
+  printHex(buf, (size_t)n);
+  Serial.println();
+
+  // Back to RX (only after handling a packet)
+  LoRa.receive();
+}
