@@ -225,6 +225,60 @@ namespace sd {
         return true;
     }
 
+    // NEW: Find next available run number
+    int findNextRunNumber() {
+        int runNumber = 1;
+        char filename[64];
+        
+        while (runNumber < 9999) {
+            snprintf(filename, sizeof(filename), "/logs/run_%04d.csv", runNumber);
+            
+            if (!SD.exists(filename)) {
+                return runNumber;
+            }
+            runNumber++;
+        }
+        
+        return -1;  // Error: too many runs
+    }
+
+    // NEW: Create numbered descent log
+    bool createNumberedDescentLog() {
+        if (!initialized && setup() != 0) return false;
+        if (!mkdirs("/logs")) return false;
+
+        int runNumber = findNextRunNumber();
+        
+        if (runNumber < 0) {
+            Serial.println("[SD] ERROR: Too many run files!");
+            return false;
+        }
+        
+        char filename[64];
+        snprintf(filename, sizeof(filename), "/logs/run_%04d.csv", runNumber);
+        
+        if (descentFile) {
+            descentFile.close();
+        }
+        
+        descentFile = SD.open(filename, FILE_WRITE);
+        
+        if (!descentFile) {
+            Serial.print("[SD] ERROR: Could not create ");
+            Serial.println(filename);
+            return false;
+        }
+        
+        // Write CSV header with all 6 columns
+        descentFile.println("timestamp [ms],temperature [C],pressure [Pa], altitude [m] ,pm2_5 [microg/m3],pm10_0 [microg/m3]");
+        descentFile.flush();
+        
+        Serial.print("[SD] Created log: ");
+        Serial.println(filename);
+        
+        return true;
+    }
+
     bool writeDescentLine(const char* line) {
         if (!line) return false;
         if (!descentFile) return false;

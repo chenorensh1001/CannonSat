@@ -50,15 +50,21 @@ Status status = Status::ACTIVE;
 // Timing
 unsigned long armTimeMs = 0; // logging the time the armed button was pressed
 unsigned long lastCommandMs = 0; // logging the exact time the command packet was last received
-const unsigned long MIN_FREEFALL_TIME_MS = 3000;    // example: 3 seconds after arming
-const unsigned long MIN_DESCENT_TIME_MS = 10000; // 10 seconds
+const unsigned long MIN_FREEFALL_TIME_MS = 0;    // example: 3 seconds after arming
+const unsigned long MIN_DESCENT_TIME_MS = 50000; // 50000 ms
 unsigned long descentStartMs = 0;
 const unsigned long COMMAND_TIMEOUT_MS   = 22000;   // 22 seconds
 static bool gnssEverValid = false; // variables for syncing the teensy internal clock and the GNSS
 static uint32_t lastGnssUnix = 0; // variables for syncing the teensy internal clock and the GNSS
 static uint32_t lastGnssMillis = 0; // variables for syncing the teensy internal clock and the GNSS
-unsigned long activeStartMs = 0; // variables for syncing the teensy internal clock and the GNSS
 bool actuatorDeployed = false;
+bool createNumberedDescentLog();
+int findNextRunNumber();
+// System-wide timestamp tracking
+unsigned long systemStartMs = 0;  // When system powered on
+unsigned long activeStartMs = 0;   // When entered ACTIVE state
+unsigned long armedStartMs = 0;    // When ARM button pressed
+unsigned long touchdownStartMs = 0; // When touchdown detected
 
 
 // Freefall detection counters
@@ -66,9 +72,9 @@ int freefallAccelCount   = 0;
 int altitudeDropCount    = 0;
 
 // Thresholds 
-const float FREEFALL_ACCEL_THRESHOLD = 11.0f;   // m/s², magnitude below this = near freefall
+const float FREEFALL_ACCEL_THRESHOLD = 3.0f;   // m/s², magnitude below this = near freefall
 const float ALTITUDE_DROP_MIN        = 0.02f;   // meters drop between samples - set to 1 m between samples (which are sampled at 0.05 seconds)
-const int   FREEFALL_ACCEL_SAMPLES   = 5;     // consecutive samples detect freefalll
+const int   FREEFALL_ACCEL_SAMPLES   = 10;     // consecutive samples detect freefalll
 const int   ALTITUDE_DROP_SAMPLES    = 3;      // consecutive
 
 // For altitude trend
@@ -85,6 +91,7 @@ int bmpHistoryIndex = 0;
 
 //Detonation event structure definition
 struct DetonationEvent {
+    uint32_t eventMillis;
     uint8_t eventTime;   // seconds since ACTIVE start
     uint8_t  peak;
     uint8_t  rms;
@@ -118,6 +125,11 @@ static inline float vec3_mag(float x, float y, float z) {
 }
 
 //TIMESTAMPING//
+// Htime since system start
+unsigned long getSystemTimeMs() {
+    return millis() - systemStartMs;
+}
+
 uint32_t getUnifiedTimestamp(uint32_t gnssTimestamp) {
     static bool gnssEverValid = false;
     static uint32_t lastGnssUnix = 0;
@@ -238,6 +250,59 @@ bool detectTouchdown(float currentAltitude) {
 }
 
 //READ SD CARD FUNCTION
+
+//SD CARD DEBUG
+// ============================================
+// SD CARD DEBUG FUNCTIONS
+// ============================================
+void logEventSummary() {
+    if (!sd::isDescentOpen()) {
+        Serial.println("[EVENT LOG] Descent file not open");
+        return;
+    }
+    
+    Serial.println("[EVENT LOG] Writing event timeline to CSV");
+    
+    // Add blank lines to separate data from events
+    sd::writeDescentLine("");
+    sd::writeDescentLine("");
+    sd::writeDescentLine("=== FLIGHT EVENT TIMELINE ===");
+    
+    char line[128];
+    
+    snprintf(line, sizeof(line), "System Start,0 ms");
+    sd::writeDescentLine(line);
+    
+    if (activeStartMs > 0) {
+        snprintf(line, sizeof(line), "Active State,%lu ms", activeStartMs - systemStartMs);
+        sd::writeDescentLine(line);
+    }
+    
+    if (armedStartMs > 0) {
+        snprintf(line, sizeof(line), "Armed,%lu ms", armedStartMs - systemStartMs);
+        sd::writeDescentLine(line);
+    }
+    
+    if (descentStartMs > 0) {
+        snprintf(line, sizeof(line), "Freefall Detected,%lu ms", descentStartMs - systemStartMs);
+        sd::writeDescentLine(line);
+        
+        snprintf(line, sizeof(line), "Actuator Deployed,%lu ms", descentStartMs - systemStartMs);
+        sd::writeDescentLine(line);
+    }
+    
+    if (touchdownStartMs > 0) {
+        snprintf(line, sizeof(line), "Touchdown,%lu ms", touchdownStartMs - systemStartMs);
+        sd::writeDescentLine(line);
+    }
+    
+    sd::flushDescentLog();
+    
+    Serial.println("[EVENT LOG] Event timeline written");
+}
+
+
+// Read and dump a specific file
 void dumpSdFile(const char* filename) {
     Serial.print("Opening file: ");
     Serial.println(filename);
@@ -257,6 +322,129 @@ void dumpSdFile(const char* filename) {
     f.close();
 }
 
+// List ALL files on SD card (recursive)
+void listAllFiles(File dir, int depth = 0) {
+    while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        
+        // Print indentation
+        for (int i = 0; i < depth; i++) Serial.print("  ");
+        
+        Serial.print(entry.name());
+        
+        if (entry.isDirectory()) {
+            Serial.println("/");
+            listAllFiles(entry, depth + 1);
+        } else {
+            Serial.print(" - ");
+            Serial.print(entry.size());
+            Serial.println(" bytes");
+        }
+        entry.close();
+    }
+}
+
+void listAllFilesOnSD() {
+    Serial.println("=== ALL FILES ON SD CARD ===");
+    File root = SD.open("/");
+    if (!root) {
+        Serial.println("Failed to open root directory");
+        return;
+    }
+    listAllFiles(root, 0);
+    root.close();
+    Serial.println("============================");
+}
+
+// List all run files in /logs directory
+void listRunFiles() {
+    Serial.println("=== RUN FILES ===");
+    
+    File dir = SD.open("/logs");
+    if (!dir) {
+        Serial.println("Failed to open /logs directory");
+        return;
+    }
+    
+    if (!dir.isDirectory()) {
+        Serial.println("/logs is not a directory");
+        dir.close();
+        return;
+    }
+    
+    int count = 0;
+    while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        
+        // Only show files that start with "run_"
+        String name = entry.name();
+        if (name.startsWith("run_") && name.endsWith(".csv")) {
+            Serial.print("  ");
+            Serial.print(entry.name());
+            Serial.print(" - ");
+            Serial.print(entry.size());
+            Serial.println(" bytes");
+            count++;
+        }
+        entry.close();
+    }
+    
+    Serial.print("Total run files: ");
+    Serial.println(count);
+    Serial.println("=================");
+    
+    dir.close();
+}
+
+// Get the current run filename
+void getCurrentRunFilename(char* buffer, size_t bufferSize) {
+    int currentRun = sd::findNextRunNumber() - 1;
+    if (currentRun < 1) {
+        buffer[0] = '\0';  // Empty string if no runs
+        return;
+    }
+    snprintf(buffer, bufferSize, "/logs/run_%04d.csv", currentRun);
+}
+
+// Dump the current run file (the one created in this session)
+void dumpCurrentRun() {
+    char filename[64];
+    getCurrentRunFilename(filename, sizeof(filename));
+    
+    if (filename[0] == '\0') {
+        Serial.println("No current run file found");
+        return;
+    }
+    
+    Serial.print("Current run file: ");
+    Serial.println(filename);
+    dumpSdFile(filename);
+}
+
+// Complete debug - shows everything
+void debugAfterRun() {
+    Serial.println("\n\n### SD CARD DEBUG ###\n");
+    
+    // Show all files
+    listAllFilesOnSD();
+    
+    Serial.println();
+    
+    // Show just run files
+    listRunFiles();
+    
+    Serial.println();
+    
+    // Dump the current run
+    dumpCurrentRun();
+}
+
+// ============================================
+// END SD CARD DEBUG FUNCTIONS
+// ============================================
+
 // MICROPHONE EVENT PROCESSING //
 // Pushing the detonation events to the detEvents struct which keeps last 4 events
 void pushDetonationEvent(const DetonationEvent& e) {
@@ -273,6 +461,7 @@ void pushDetonationEvent(const DetonationEvent& e) {
 }
 
 // Main event processing function
+// Main event processing function
 void processSoundEvents() {
     static bool isEventActive = false;
     static uint32_t eventStartTime = 0;
@@ -286,7 +475,7 @@ void processSoundEvents() {
     const uint8_t DOWNSAMPLE_FACTOR = 22;
 
     // Tunables
-    const int SOUND_THRESHOLD = 150;
+    const int SOUND_THRESHOLD = 362; // HAVE TO CHANGE THIS, TUNE
     const uint32_t COOLDOWN_MS = 50;
 
     int16_t tempBuffer[128];
@@ -338,7 +527,8 @@ void processSoundEvents() {
         }
 
         DetonationEvent e;
-        e.eventTime = (uint8_t)((eventStartTime - activeStartMs) / 1000);
+        e.eventMillis = (uint32_t)(eventStartTime); //aboslute time reference in milliseconds
+        e.eventTime = (uint8_t)((eventStartTime - activeStartMs) / 1000); // absolute time
         e.peak      = (uint8_t)(eventMaxPeak / 128);
         e.rms       = (uint8_t)(sqrt(sumSquares / (double)sampleCount) / 128);
         e.duration  = (uint16_t)(lastLoudSampleTime - eventStartTime);
@@ -363,7 +553,6 @@ uint8_t getDetonationEvents(DetonationEvent out[4]) {
     return n;
 }
 
-
 void flash_flushToSD() {
     if (sampleBufferIndex == 0) return;
 
@@ -372,6 +561,10 @@ void flash_flushToSD() {
         Serial.println("Descent log not open!");
         return;
     }
+
+    Serial.print("[FLASH] Writing ");
+    Serial.print(sampleBufferIndex);
+    Serial.println(" samples to SD...");
 
     // Write all buffered samples (or make this chunked if needed)
     for (int i = 0; i < sampleBufferIndex; i++) {
@@ -386,7 +579,14 @@ void flash_flushToSD() {
                  s.altitude,
                  s.pm2_5,
                  s.pm10_0);
+        
+        sd::writeDescentLine(line);  // Actually write the line!
     }
+
+    // CRITICAL: Flush data to physical SD card
+    sd::flushDescentLog();
+    
+    Serial.println("[FLASH] Flush complete");
 
     // Clear buffer after committing the batch
     sampleBufferIndex = 0;
@@ -415,6 +615,7 @@ void setup() {
     Serial1.begin(9600);
     delay(1000);
     Serial.println("hello");
+    systemStartMs = millis();
     Teensy3Clock.set(1737460800); 
     bool ok = true;
 
@@ -433,7 +634,7 @@ void setup() {
 
     logStep("interface::setup()");
     interface::setup();
-    logResult("interface::setup()", true); // your interface::setup() is void
+    logResult("interface::setup()", true);
 
     logStep("sd::setup()");
     ok &= (sd::setup() == 0);
@@ -445,10 +646,11 @@ void setup() {
         ok &= micOk;
         logResult("sd::openMicLogs()", micOk);
 
-        logStep("sd::openDescentLog()");
-        bool descOk = sd::openDescentLog(SD_LOG_PATH, "timestampMs,temperature,pressure,altitude");
+        // Create numbered descent log file
+        logStep("sd::createNumberedDescentLog()");
+        bool descOk = sd::createNumberedDescentLog();
         ok &= descOk;
-        logResult("sd::openDescentLog()", descOk);
+        logResult("sd::createNumberedDescentLog()", descOk);
     }
 
     logStep("lora::setup()");
@@ -458,11 +660,11 @@ void setup() {
 
     logStep("gnss::setup()");
     gnss::setup();
-    logResult("gnss::setup()", true); // void
+    logResult("gnss::setup()", true);
 
     logStep("imu::setup()");
     imu::setup();
-    logResult("imu::setup()", true); // void
+    logResult("imu::setup()", true);
 
     logStep("bmp::setup()");
     bool bmpOk = (bmp::setup() == 0);
@@ -471,19 +673,23 @@ void setup() {
 
     logStep("pm::setup()");
     pm::setup();
-    logResult("pm::setup()", true); // void
+    logResult("pm::setup()", true);
 
     logStep("actuator::setup()");
     actuator::setup();
-    logResult("actuator::setup()", true); // void
+    logResult("actuator::setup()", true);
+
 
     logStep("actuator::undeploy()");
+    // actuator::trigger();
+
+    // delay(10000);
     actuator::undeploy();
     logResult("actuator::undeploy()", true);
 
     logStep("mic::setup(16384)");
     mic::setup(16384);
-    logResult("mic::setup()", true); // void
+    logResult("mic::setup()", true);
 
     if (!ok) {
         Serial.println("[SETUP] ERROR: One or more subsystems failed. Blinking forever.");
@@ -500,52 +706,20 @@ void setup() {
 
 
 
-// //SETUP//
-// void setup() {
-//     Serial.begin(9600);
-//     Serial1.begin(9600);
-//     delay(1000);
-//     Serial.println("hello");
-
-//     interface::setup();
-
-//     bool ok = true;
-
-//     ok &= (sd::setup() == 0);
-//     if (ok) {
-//         ok &= sd::openMicLogs();
-//         ok &= sd::openDescentLog(SD_LOG_PATH, "timestampMs,temperature,pressure,altitude");
-//     }
-//     // --- OTHER SUBSYSTEMS ---
-//     Serial.println("before lora");
-//     ok &= (lora::setup() == 0);
-
-//     gnss::setup();
-//     imu::setup();
-//     ok &= (bmp::setup() == 0);
-//     pm::setup();
-//     actuator::setup();
-//     actuator::undeploy();
-//     mic::setup(16384);
-
-//     if (!ok) {
-//         interface::startSystemBlinking();
-//         while (1) {
-//             interface::serviceBlink();
-//             delay(10);
-//         }
-//     }
-
-//     interface::stopSystemBlinking();
-//     Serial.println("setup finished");
-// }
-
-
 //ACTIVE// 
 void handleActive() {
     static bool armedLatched = false;   // prevents re-arming logic from running again
-
     unsigned long now = millis();
+
+    static bool firstEntry = true;
+    if (firstEntry) {
+        activeStartMs = now;
+        firstEntry = false;
+        Serial.print("[ACTIVE] Entered at system time: ");
+        Serial.print(getSystemTimeMs());
+        Serial.println(" ms");
+    }
+
     mic::discardBuffer();
 
     // If ARM button pressed -> go ARMED and turn on yellow LED
@@ -557,7 +731,7 @@ void handleActive() {
         freefallAccelCount = 0;          
         altitudeDropCount = 0;
         hasLastAltitude = false;
-        interface::setArmedLed(true);
+        interface::setArmedLed(false);
     }
 }
    
@@ -600,26 +774,26 @@ void handleArmed() {
         lastPrint = now;
 
         // IMU
-        Serial.print("ACC [m/s^2]  X=");
-        Serial.print(accel.acceleration.x, 3);
-        Serial.print("  Y=");
-        Serial.print(accel.acceleration.y, 3);
-        Serial.print("  Z=");
-        Serial.print(accel.acceleration.z, 3);
-        Serial.print("  |a|=");
-        Serial.print(aMag, 3);
+        // Serial.print("ACC [m/s^2]  X=");
+        // Serial.print(accel.acceleration.x, 3);
+        // Serial.print("  Y=");
+        // Serial.print(accel.acceleration.y, 3);
+        // Serial.print("  Z=");
+        // Serial.print(accel.acceleration.z, 3);
+        // Serial.print("  |a|=");
+        // Serial.print(aMag, 3);
 
         // BMP
         if (b.valid) {
-            Serial.print("  |  ALT=");
-            Serial.print(b.altitude, 2);
-            Serial.print(" m  P=");
-            Serial.print(b.pressure / 100.0, 2); // Pa → hPa
-            Serial.print(" hPa  T=");
-            Serial.print(b.temperature, 2);
-            Serial.println(" C");
+            // Serial.print("  |  ALT=");
+            // Serial.print(b.altitude, 2);
+            // Serial.print(" m  P=");
+            // Serial.print(b.pressure / 100.0, 2); // Pa → hPa
+            // Serial.print(" hPa  T=");
+            // Serial.print(b.temperature, 2);
+            // Serial.println(" C");
         } else {
-            Serial.println("  |  BMP INVALID");
+            // Serial.println("  |  BMP INVALID");
         }
     }
     // ---------------------------------------------------------
@@ -651,8 +825,17 @@ void handleArmed() {
 
     if (accelOk && altOk && timeOk) {
         Serial.println("Freefall detected → DESCENT");
+        Serial.print("[FREEFALL] Detected at system time: ");
+        Serial.print(getSystemTimeMs());
+        Serial.println(" ms");
+        
         actuator::trigger(); // deploy
+        
         Serial.println("ACTUATOR DEPLOYED");
+        Serial.print("[ACTUATOR] Deployed at system time: ");
+        Serial.print(getSystemTimeMs());
+        Serial.println(" ms");
+        
         status = Status::DESCENT;
         descentStartMs = now;
         freefallAccelCount = 0;
@@ -736,7 +919,7 @@ void handleDescent() {
 
     // 1 Hz block
     if (now - lastHzTick >= 1000) {
-        lastHzTick = now;
+        lastHzTick += 1000;
 
         bmp::Reading b = bmp::read();
         sensors_event_t accel, gyro, mag, temp;
@@ -766,13 +949,13 @@ void handleDescent() {
 
         gnss::Location loc = getEnrichedLocation(b.altitude);
 
-        Serial.print("[DEBUG] loc.timestamp = "); Serial.println(loc.timestamp);
-        Serial.print("[DEBUG] getUnifiedTimestamp() = "); Serial.println(getUnifiedTimestamp(loc.timestamp));
-        Serial.print("[DEBUG] millis() = "); Serial.println(now);
+        // Serial.print("[DEBUG] loc.timestamp = "); Serial.println(loc.timestamp);
+        // Serial.print("[DEBUG] getUnifiedTimestamp() = "); Serial.println(getUnifiedTimestamp(loc.timestamp));
+        // Serial.print("[DEBUG] millis() = "); Serial.println(now);
 
 
         Sample s;
-        s.timestampMs = getUnifiedTimestamp(loc.timestamp);
+        s.timestampMs = getSystemTimeMs();
         s.temperature = b.temperature;
         s.pressure    = b.pressure;
         s.altitude    = b.altitude;
@@ -786,25 +969,30 @@ void handleDescent() {
         }
 
         // Add this right after you populate the Sample s (after the PM data section)
-        Serial.println("=== SAMPLE DEBUG ===");
-        Serial.print("Timestamp: "); Serial.println(s.timestampMs);
-        Serial.print("Temperature: "); Serial.print(s.temperature); Serial.println(" °C");
-        Serial.print("Pressure: "); Serial.print(s.pressure); Serial.println(" Pa");
-        Serial.print("Altitude: "); Serial.print(s.altitude); Serial.println(" m");
-        Serial.print("PM2.5: "); Serial.println(s.pm2_5);
-        Serial.print("PM10.0: "); Serial.println(s.pm10_0);
-        Serial.println("===================");
+        // Serial.println("=== SAMPLE DEBUG ===");
+        // Serial.print("Timestamp: "); Serial.println(s.timestampMs);
+        // Serial.print("Temperature: "); Serial.print(s.temperature); Serial.println(" °C");
+        // Serial.print("Pressure: "); Serial.print(s.pressure); Serial.println(" Pa");
+        // Serial.print("Altitude: "); Serial.print(s.altitude); Serial.println(" m");
+        // Serial.print("PM2.5: "); Serial.println(s.pm2_5);
+        // Serial.print("PM10.0: "); Serial.println(s.pm10_0);
+        // Serial.println("===================");
         flash_storeSample(s);
 
         
         // Touchdown detection (only after minimum descent time)
         if (descentTimeOk && detectTouchdown(b.altitude)) {
             Serial.println("[DESCENT] TOUCHDOWN detected");
+            Serial.print("[TOUCHDOWN] Detected at system time: ");
+            Serial.print(getSystemTimeMs());
+            Serial.println(" ms");
+            
+            // touchdownStartMs = now;
 
             // Finalize microphone logging
             mic::stop();
 
-            status = Status::TOUCHDOWN;
+            // status = Status::TOUCHDOWN;
             return;
         }
 
@@ -815,26 +1003,27 @@ void handleDescent() {
 
         uint8_t team = cmdByte & 0x0F;
         if (team != (TEAM_ID & 0x0F)) {
-            // Serial.print("[CMD] Not for us, team=");
-            // Serial.println(team);
+            Serial.print("[CMD] Not for us, team=");
+            Serial.println(team);
         } else {
             bool reqSci = (cmdByte & (1u << 4));
             bool reqTel = (cmdByte & (1u << 5));
 
-            // Serial.print("[CMD] our team. reqSci=");
-            // Serial.print(reqSci);
-            // Serial.print(" reqTel=");
-            // Serial.println(reqTel);
+            Serial.print("[CMD] our team. reqSci=");
+            Serial.print(reqSci);
+            Serial.print(" reqTel=");
+            Serial.println(reqTel);
 
             // Spec: respond >= 50 ms after receiving command
             delay(60);
 
             // Send exactly what was requested
-            if (reqSci) {
-                lora::sendScience(s);
-            }
             if (reqTel) {
                 lora::sendTelemetry(loc, b.altitude);
+            }
+            if (reqSci) {
+                lora::sendScience(s);
+                // delay(200);
             }
 
             lastCommandMs = now;
@@ -842,6 +1031,11 @@ void handleDescent() {
         }
     } else {
         if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
+            Serial.print("[DESCENT] Command timeout (");
+            Serial.print(COMMAND_TIMEOUT_MS);
+            Serial.print(" ms) - flushing ");
+            Serial.print(sampleBufferIndex);
+            Serial.println(" samples to SD");
             flash_flushToSD();
             lastCommandMs = now;
         }
@@ -857,26 +1051,34 @@ void handleDescent() {
         Serial.println(descentTimeOk ? "YES" : "NO");
     }
 }
-
-
 //TOUCHDOWN//
 void handleTouchdown() {
     static unsigned long lastPrint = 0;
+    //static unsigned long touchdownStartMs = 0;
+    static bool debugged = false;
+    static bool dataCollectionActive = true;  // flag to stop data collection
     unsigned long now = millis();
+    logEventSummary();
+
+    // Record when we entered touchdown
+    if (touchdownStartMs == 0) {
+        touchdownStartMs = now;
+    }
+    
     gnss::update();
     pm::update();
 
-    // Read sensors
+    // Read sensors (always read, even if not storing)
     bmp::Reading b = bmp::read();
     sensors_event_t accel, gyro, mag, temp;
     imu::read(accel, gyro, mag, temp);
     pm::Reading pmr = pm::read();
 
     gnss::Location loc = getEnrichedLocation(b.altitude);
-    debugPrintGnss(loc);
-    // Build sample
+    
+    // Build sample (always build, so we can use it for LoRa response)
     Sample s;
-    s.timestampMs = loc.timestamp;
+    s.timestampMs = getUnifiedTimestamp(loc.timestamp);
     s.temperature = b.temperature;
     s.pressure    = b.pressure;
     s.altitude    = b.altitude;
@@ -890,7 +1092,12 @@ void handleTouchdown() {
         s.pm2_5  = -1;
     }
     
-    // LoRa command handling
+    // Only store sample if data collection is still active
+    if (dataCollectionActive) {
+        flash_storeSample(s);
+    }
+    
+    // LoRa command handling (always listen for commands)
     uint8_t cmdByte = 0;
     bool command = lora::receiveCommand(cmdByte);
 
@@ -898,7 +1105,7 @@ void handleTouchdown() {
         uint8_t team = cmdByte & 0x0F;
         if (team != (TEAM_ID & 0x0F)) {
             Serial.print("[CMD] Not for us, team="); Serial.println(team);
-            return;  // or ignore
+            return;
         }
 
         Serial.print("[CMD] cmdByte=0x"); Serial.println(cmdByte, HEX);
@@ -909,23 +1116,42 @@ void handleTouchdown() {
         delay(60); // >= 50 ms
 
         if (reqTel) {
-            // lora::sendTelemetry(loc, bmpAlt);
+            lora::sendTelemetry(loc, b.altitude);
         }
         if (reqSci) {
+            // Use current sample for science response
             lora::sendScience(s);
         }
 
         lastCommandMs = now;
         flash_flushToSD();
+        
+        // STOP data collection after command received
+        dataCollectionActive = false;
+        Serial.println("[TOUCHDOWN] Data collection stopped after command");
     }
 
-        // Non-blocking tick
-        if (now - lastPrint > 1000) {
-            lastPrint = now;
-            Serial.println("[TOUCHDOWN] tick");
+    // Non-blocking tick
+    if (now - lastPrint > 1000) {
+        lastPrint = now;
+        Serial.print("[TOUCHDOWN] tick");
+        if (!dataCollectionActive) {
+            Serial.print(" (data collection STOPPED)");
         }
+        Serial.println();
     }
 
+
+    // Debug SD card after 3 seconds in touchdown (ensures data is flushed)
+    if (!debugged && (now - touchdownStartMs > 3000)) {
+        Serial.println("\n[TOUCHDOWN] Running SD card debug...\n");
+        flash_flushToSD();  // Make sure everything is written
+        delay(100);         // Give SD time to finish
+        logEventSummary();
+        // debugAfterRun();    // Shows everything + dumps current run
+        // debugged = true;
+    }
+}
 
 
 void loop() {
@@ -937,21 +1163,23 @@ void loop() {
     actuator::update();
     interface::update();
 
-    // RESET works from any state
+    // RESET works from any state - HARDWARE RESET
     if (interface::resetPressed()) {
-        status = Status::ACTIVE;
-        interface::setArmedLed(false);
-        freefallAccelCount = 0;
-        altitudeDropCount = 0;
-        hasLastAltitude = false;
-        lastAltitude = 0;
-        armTimeMs = millis();
-        actuatorDeployed = false;  // optional depending on your mission rules
-
-        Serial.println("RESET → ACTIVE");
+        Serial.println("RESET BUTTON PRESSED - REBOOTING...");
+        
+        // Close files cleanly before reset
+        sd::closeDescentLog();
+        sd::closeMicLogs();
+        
+        Serial.flush();  // Ensure message is sent
+        delay(100);      // Give time for cleanup
+        
+        // Perform hardware reset
+        SCB_AIRCR = 0x05FA0004;  // ARM Cortex-M7 reset command
+        // Program will restart from setup()
     }
 
-// Status
+    // Status
     switch (status) {
         case Status::ACTIVE:    handleActive();    break;
         case Status::ARMED:     handleArmed();     break;
@@ -959,8 +1187,6 @@ void loop() {
         case Status::TOUCHDOWN: handleTouchdown(); break;
     }
 }
-
-
 
 // void setup() {
 //     Serial.begin(9600);

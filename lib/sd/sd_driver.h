@@ -110,30 +110,89 @@ namespace sd {
      */
     bool exists(const char* path);
 
-        // -----------------------------
+    // -----------------------------
     // Microphone log helpers (open once, write often)
     // -----------------------------
 
-    // Open /logs/mic_2khz.bin and /logs/acoustic.txt once at startup (append mode)
+    /**
+     * @brief Open /logs/mic_2khz.bin and /logs/acoustic.txt once at startup (append mode).
+     * @return true on success, false on failure.
+     */
     bool openMicLogs();
 
-    // Write raw mic bytes to mic_2khz.bin (does NOT flush every call)
+    /**
+     * @brief Write raw mic bytes to mic_2khz.bin (does NOT flush every call).
+     * @param data Pointer to raw microphone data.
+     * @param len Number of bytes to write.
+     * @return size_t Number of bytes written.
+     */
     size_t writeMicRaw(const void* data, size_t len);
 
-    // Write one CSV line to acoustic.txt (does NOT flush every call)
+    /**
+     * @brief Write one CSV line to acoustic.txt (does NOT flush every call).
+     * @param line C-string line to write.
+     * @return true if written successfully, false otherwise.
+     */
     bool writeMicEventLine(const char* line);
 
-    // Optional: flush both mic files
+    /**
+     * @brief Flush both microphone log files to SD card.
+     */
     void flushMicLogs();
 
-    // Optional: close both mic files
+    /**
+     * @brief Close both microphone log files.
+     */
     void closeMicLogs();
 
+    // -----------------------------
+    // Descent log (open once, write many)
+    // -----------------------------
 
-        // Descent log (open once, write many)
+    /**
+     * @brief Open a descent log file with a header line (legacy method).
+     * @param path File path for the descent log.
+     * @param headerLine CSV header to write if file is new.
+     * @return true on success, false on failure.
+     */
     bool openDescentLog(const char* path, const char* headerLine);
+
+    /**
+     * @brief Find the next available run number for numbered log files.
+     * @return int Next available run number (1-9998), or -1 on error.
+     */
+    int findNextRunNumber();
+
+    /**
+     * @brief Create a numbered descent log file (e.g., /logs/run_0001.csv).
+     * 
+     * Automatically finds the next available run number and creates the file
+     * with a CSV header: timestamp,temperature,pressure,altitude,pm2_5,pm10_0
+     * 
+     * @return true on success, false on failure.
+     */
+    bool createNumberedDescentLog();
+
+    /**
+     * @brief Write one CSV line to the currently open descent log.
+     * @param line C-string CSV line to write.
+     * @return true if written successfully, false otherwise.
+     */
     bool writeDescentLine(const char* line);
+
+    /**
+     * @brief Flush the descent log to SD card.
+     */
     void flushDescentLog();
+
+    /**
+     * @brief Close the descent log file.
+     */
     void closeDescentLog();
+
+    /**
+     * @brief Check if the descent log is currently open.
+     * @return true if open, false otherwise.
+     */
     bool isDescentOpen();
 }

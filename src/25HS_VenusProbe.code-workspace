@@ -3,6 +3,10 @@
 		{
 			"name": "25HS_VenusProbe",
 			"path": ".."
+		},
+		{
+			"name": "SD_READ",
+			"path": "../../../../../../../../Other/Documents/PlatformIO/Projects/SD_READ"
 		}
 	],
 	"settings": {}

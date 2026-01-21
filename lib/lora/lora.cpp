@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 struct DetonationEvent {
+    uint32_t eventMillis;
     uint8_t  eventTime;   // seconds since ACTIVE start (1 byte per packet spec)
     uint8_t  peak;
     uint8_t  rms;
@@ -190,7 +191,7 @@ namespace lora {
     bool receiveCommand(uint8_t& cmdByteOut) {
             // Serial.println("receiveCommand called");
             if (!packetAvailable()) return false;
-            Serial.println("yes1");
+            Serial.println("command received");
 
             char buf[255];
             size_t len = sizeof(buf);
@@ -232,7 +233,7 @@ namespace lora {
             lastTs  = (uint32_t)loc.timestamp;
             lastVel = (int16_t)(loc.verticalVelocity * 100.0);
         }
-
+        Serial.println("Building Telemetry Packet");
         packInt24(lastLat, &packet[1]);
         packInt24(lastLon, &packet[4]);
         packInt16(lastVel, &packet[7]);
@@ -244,71 +245,37 @@ namespace lora {
     }
 
     bool sendTelemetry(const gnss::Location& loc, float bmpAltitude) {
+        Serial.println("[TEL] === sendTelemetry START ===");
+        
         uint8_t packet[16];
-
         buildTelemetryPacket(packet, loc, bmpAltitude);
-
-        // debugPrintTelemetry(loc, bmpAltitude);
-        // debugPrintPacket(packet, sizeof(packet));
-
-        return lora::send((const char*)packet, sizeof(packet));
+        
+        // Print the actual packet bytes
+        Serial.print("[TEL] Packet bytes: ");
+        for (int i = 0; i < 16; i++) {
+            if (packet[i] < 0x10) Serial.print("0");
+            Serial.print(packet[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+        
+        // Print what we're sending
+        Serial.print("[TEL] Lat: "); Serial.print(loc.latitude, 6);
+        Serial.print(" Lon: "); Serial.print(loc.longitude, 6);
+        Serial.print(" Alt: "); Serial.print(bmpAltitude);
+        Serial.print(" Valid: "); Serial.println(loc.valid);
+        
+        bool result = lora::send((const char*)packet, sizeof(packet));
+        
+        Serial.print("[TEL] Send result: ");
+        Serial.println(result ? "SUCCESS" : "FAILED");
+        Serial.println("[TEL] === sendTelemetry END ===");
+        
+        return result;
     }
 
 
-    //DEBUG THE TELEMETRY PACKET
-    // void debugPrintTelemetry(const gnss::Location& loc, float bmpAltitude) {
-    //     Serial.println("=== TELEMETRY DEBUG ===");
-    //     Serial.print("GNSS valid now: ");
-    //     Serial.println(loc.valid ? "YES" : "NO");
-
-    //     Serial.print("Current GNSS lat/lon: ");
-    //     Serial.print(loc.latitude, 6);
-    //     Serial.print(", ");
-    //     Serial.println(loc.longitude, 6);
-
-    //     Serial.print("Current GNSS Alt: ");
-    //     Serial.println(loc.altitude);
-
-    //     Serial.print("BMP Altitude: ");
-    //     Serial.println(bmpAltitude);
-
-    //     Serial.print("Vertical Velocity (current): ");
-    //     Serial.println(loc.verticalVelocity);
-
-    //     Serial.println("--- VALUES SENT IN PACKET ---");
-    //     Serial.print("Sent Latitude: ");
-    //     Serial.println(lastLat / 100000.0, 6);
-
-    //     Serial.print("Sent Longitude: ");
-    //     Serial.println(lastLon / 100000.0, 6);
-
-    //     Serial.print("Sent Vertical Velocity: ");
-    //     Serial.println(lastVel / 100.0);
-
-    //     Serial.print("Sent Timestamp: ");
-    //     Serial.println(lastTs);
-
-    //     Serial.println("=============================");
-    // }
-
-    // void debugPrintPacket(uint8_t* packet, size_t len) {
-    //     Serial.print("Packet bytes: ");
-    //     for (size_t i = 0; i < len; i++) {
-    //         if (packet[i] < 16) Serial.print("0");
-    //         Serial.print(packet[i], HEX);
-    //         Serial.print(" ");
-    //     }
-    //     Serial.println();
-    // }
-
-    // void debugTelemetry(const gnss::Location& loc, float bmpAltitude) {
-    //     uint8_t packet[16];
-    //     buildTelemetryPacket(packet, loc, bmpAltitude);
-
-    //     debugPrintTelemetry(loc, bmpAltitude);
-    //     debugPrintPacket(packet, sizeof(packet));
-    // }
-
+ 
 
 // ---------------------------------------------------------------------
 // Science Packet
@@ -316,7 +283,7 @@ namespace lora {
 
     void buildSciencePacket(uint8_t* packet, const Sample& s) {
         memset(packet, 0, 80);
-        Serial.println("startingtobuild");
+        Serial.println("Building Science Packet");
         // Packet ID + Team ID (Team 4)
         packet[0] = 0x14;
 
@@ -332,13 +299,20 @@ namespace lora {
         // ---------------------------
         DetonationEvent ev[4] = {};
         uint8_t nEv = getDetonationEvents(ev);
+        uint32_t now = millis();
 
         for (uint8_t i = 0; i < nEv && i < 4; i++) {
             uint8_t base = 6 + i * 5;
-            packet[base + 0] = ev[i].eventTime;            // 1 byte
-            packet[base + 1] = ev[i].peak;                 // 1 byte
-            packet[base + 2] = ev[i].rms;                  // 1 byte
-            packUInt16(ev[i].duration, &packet[base + 3]); // 2 bytes
+
+            // USE e[0] (eventMillis) only for the calculation of relative time
+            int32_t diff = ((int32_t)ev[i].eventMillis - (int32_t)now) / 1000;
+            int8_t relativeTime = (int8_t)constrain(diff, -128, 0); //because relative time always negative
+
+            // PACKING into LoRa Packet:
+            packet[base + 0] = (uint8_t)relativeTime;      // How many seconds ago
+            packet[base + 1] = ev[i].peak;                 // e[2]
+            packet[base + 2] = ev[i].rms;                  // e[3]
+            packUInt16(ev[i].duration, &packet[base + 3]); // e[4]
         }
 
         // ---------------------------
