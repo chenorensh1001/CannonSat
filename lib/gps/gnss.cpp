@@ -41,6 +41,10 @@ Location read() {
     static float  lastAlt = 0.0f;
     static float  lastSpd = 0.0f;
     static float  lastCrs = 0.0f;
+    
+    // Track last GPS sync time
+    static unsigned long lastGpsSync = 0;
+    static unsigned long lastGpsTimestamp = 0;
 
     if (gps.location.isValid()) {
         loc.latitude  = gps.location.lat();
@@ -67,12 +71,23 @@ Location read() {
         loc.valid     = false;
     }
 
-    if (gps.date.isValid() && gps.time.isValid()) {
+    // Timestamp logic with GPS sync and Teensy fallback
+    if (gps.date.isValid() && gps.time.isValid() && gps.date.year() > 2020) {
+        // GPS time is valid AND reasonable - use it and sync our reference
         loc.timestamp = convertToUnix(gps.date, gps.time);
+        lastGpsTimestamp = loc.timestamp;
+        lastGpsSync = millis();
+    } else if (lastGpsSync > 0) {
+        // GPS lost but we had it before - calculate elapsed time
+        unsigned long elapsed = (millis() - lastGpsSync) / 1000; // seconds
+        loc.timestamp = lastGpsTimestamp + elapsed;
     } else {
+        // Never had GPS or GPS date is invalid (year 2000) - return 0
         loc.timestamp = 0;
     }
 
+    Serial1.println("[GNSS DEBUG] returning timestamp = "); 
+    Serial.println(loc.timestamp);
     return loc;
 }
 
@@ -121,5 +136,4 @@ void end() {
 //         Serial.write(Serial1.read());
 //     }
 // }
-
 

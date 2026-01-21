@@ -142,6 +142,8 @@ uint32_t getUnifiedTimestamp(uint32_t gnssTimestamp) {
     return nowMs / 1000;
 }
 
+
+
 // GNSS
 gnss::Location getEnrichedLocation(float bmpAltitude) {
     gnss::Location raw = gnss::read();
@@ -377,13 +379,13 @@ void flash_flushToSD() {
 
         char line[128];
         snprintf(line, sizeof(line),
-                 "%lu,%.2f,%.2f,%.2f",
+                 "%lu,%.2f,%.2f,%.2f,%.2f,%.2f",
                  s.timestampMs,
                  s.temperature,
                  s.pressure,
-                 s.altitude);
-
-        sd::writeDescentLine(line);
+                 s.altitude,
+                 s.pm2_5,
+                 s.pm10_0);
     }
 
     // Clear buffer after committing the batch
@@ -413,7 +415,7 @@ void setup() {
     Serial1.begin(9600);
     delay(1000);
     Serial.println("hello");
-
+    Teensy3Clock.set(1737460800); 
     bool ok = true;
 
     // Helper for consistent logging
@@ -764,8 +766,13 @@ void handleDescent() {
 
         gnss::Location loc = getEnrichedLocation(b.altitude);
 
+        Serial.print("[DEBUG] loc.timestamp = "); Serial.println(loc.timestamp);
+        Serial.print("[DEBUG] getUnifiedTimestamp() = "); Serial.println(getUnifiedTimestamp(loc.timestamp));
+        Serial.print("[DEBUG] millis() = "); Serial.println(now);
+
+
         Sample s;
-        s.timestampMs = loc.timestamp;
+        s.timestampMs = getUnifiedTimestamp(loc.timestamp);
         s.temperature = b.temperature;
         s.pressure    = b.pressure;
         s.altitude    = b.altitude;
@@ -778,6 +785,15 @@ void handleDescent() {
             s.pm10_0 = lastPmReading.valid ? lastPmReading.pm10_0 : -1;
         }
 
+        // Add this right after you populate the Sample s (after the PM data section)
+        Serial.println("=== SAMPLE DEBUG ===");
+        Serial.print("Timestamp: "); Serial.println(s.timestampMs);
+        Serial.print("Temperature: "); Serial.print(s.temperature); Serial.println(" °C");
+        Serial.print("Pressure: "); Serial.print(s.pressure); Serial.println(" Pa");
+        Serial.print("Altitude: "); Serial.print(s.altitude); Serial.println(" m");
+        Serial.print("PM2.5: "); Serial.println(s.pm2_5);
+        Serial.print("PM10.0: "); Serial.println(s.pm10_0);
+        Serial.println("===================");
         flash_storeSample(s);
 
         
@@ -799,16 +815,16 @@ void handleDescent() {
 
         uint8_t team = cmdByte & 0x0F;
         if (team != (TEAM_ID & 0x0F)) {
-            Serial.print("[CMD] Not for us, team=");
-            Serial.println(team);
+            // Serial.print("[CMD] Not for us, team=");
+            // Serial.println(team);
         } else {
             bool reqSci = (cmdByte & (1u << 4));
             bool reqTel = (cmdByte & (1u << 5));
 
-            Serial.print("[CMD] our team. reqSci=");
-            Serial.print(reqSci);
-            Serial.print(" reqTel=");
-            Serial.println(reqTel);
+            // Serial.print("[CMD] our team. reqSci=");
+            // Serial.print(reqSci);
+            // Serial.print(" reqTel=");
+            // Serial.println(reqTel);
 
             // Spec: respond >= 50 ms after receiving command
             delay(60);
@@ -900,7 +916,7 @@ void handleTouchdown() {
         }
 
         lastCommandMs = now;
-        // flash_flushToSD();
+        flash_flushToSD();
     }
 
         // Non-blocking tick
