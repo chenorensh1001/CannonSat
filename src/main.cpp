@@ -987,12 +987,12 @@ void handleDescent() {
             Serial.print(getSystemTimeMs());
             Serial.println(" ms");
             
-            // touchdownStartMs = now;
+            touchdownStartMs = now;
 
             // Finalize microphone logging
             mic::stop();
 
-            // status = Status::TOUCHDOWN;
+            status = Status::TOUCHDOWN;
             return;
         }
 

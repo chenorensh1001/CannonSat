@@ -18,7 +18,9 @@ namespace actuator {
     void undeploy() {
         digitalWrite(PIN_IN1, HIGH);
         digitalWrite(PIN_IN2, LOW);
-
+        //analogWriteResolution(8);
+        //analogWriteFrequency(PIN_IN1, 20000);
+        //analogWrite(PIN_IN1, 128);
         active = false;
         actuatorDeployed = false;
         startTime = 0;
