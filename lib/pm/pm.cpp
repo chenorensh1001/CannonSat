@@ -13,7 +13,7 @@ static constexpr uint8_t D9_HEADER_1 = 0x4D;
 static constexpr uint8_t D9_FRAME_LEN_0 = 0x00;
 static constexpr uint8_t D9_FRAME_LEN_1 = 0x1C;
 static constexpr int D9_PACKET_SIZE = 32;
-static constexpr uint32_t D9_SENSOR_TIMEOUT_MS = 10;  // 2 seconds to get a packet
+static constexpr uint32_t D9_SENSOR_TIMEOUT_MS = 100;  // 2 seconds to get a packet
 
 // Circular buffer for D9 packets
 static constexpr int D9_BUFFER_SIZE = 2;
@@ -121,13 +121,13 @@ static Reading parsePacket(const uint8_t* packet) {
     r.valid = true;
     
     // // Debug output
-    // Serial.print("PM: PM1.0=");
-    // Serial.print(r.pm1_0);
-    // Serial.print(" PM2.5=");
-    // Serial.print(r.pm2_5);
-    // Serial.print(" PM10=");
-    // Serial.print(r.pm10_0);
-    // Serial.println(" µg/m³");
+    Serial.print("PM: PM1.0=");
+    Serial.print(r.pm1_0);
+    Serial.print(" PM2.5=");
+    Serial.print(r.pm2_5);
+    Serial.print(" PM10=");
+    Serial.print(r.pm10_0);
+    Serial.println(" µg/m³");
     
     return r;
 }

@@ -610,8 +610,8 @@ void debugPrintGnss(const gnss::Location& loc) {
 
 //SETUP//
 void setup() {
-    Serial.begin(9600);
-    Serial1.begin(9600);
+    Serial.begin(100000);
+    Serial1.begin(100000);
     delay(1000);
     Serial.println("hello");
     systemStartMs = millis();
@@ -633,6 +633,7 @@ void setup() {
 
     logStep("interface::setup()");
     interface::setup();
+    delay(100);
     logResult("interface::setup()", true);
 
     logStep("sd::setup()");
@@ -655,37 +656,45 @@ void setup() {
     logStep("lora::setup()");
     bool loraOk = (lora::setup() == 0);
     ok &= loraOk;
+    delay(100);
     logResult("lora::setup()", loraOk);
 
     logStep("gnss::setup()");
     gnss::setup();
+    delay(100);
     logResult("gnss::setup()", true);
 
     logStep("imu::setup()");
     imu::setup();
+    delay(100);
     logResult("imu::setup()", true);
 
     logStep("bmp::setup()");
     bool bmpOk = (bmp::setup() == 0);
     ok &= bmpOk;
+    delay(100);
     logResult("bmp::setup()", bmpOk);
 
     logStep("pm::setup()");
     pm::setup();
+    delay(100);
     logResult("pm::setup()", true);
 
     logStep("actuator::setup()");
     actuator::setup();
+    delay(100);
     logResult("actuator::setup()", true);
 
     logStep("actuator::undeploy()");
     // actuator::trigger();
     // delay(10000);
     actuator::undeploy();
+    delay(100);
     logResult("actuator::undeploy()", true);
 
     logStep("mic::setup(16384)");
     mic::setup(16384);
+    delay(100);
     logResult("mic::setup()", true);
 
     if (!ok) {
@@ -925,17 +934,17 @@ void handleDescent() {
 
         // Touchdown detection (only after minimum descent time)
         if (descentTimeOk && detectTouchdown(b.altitude)) {
-            // // Serial.println("[DESCENT] TOUCHDOWN detected");
-            // Serial.print("[TOUCHDOWN] Detected at system time: ");
-            // Serial.print(getSystemTimeMs());
-            // Serial.println(" ms");
+            // Serial.println("[DESCENT] TOUCHDOWN detected");
+            Serial.print("[TOUCHDOWN] Detected at system time: ");
+            Serial.print(getSystemTimeMs());
+            Serial.println(" ms");
             
-            // // touchdownStartMs = now;
+            // touchdownStartMs = now;
 
-            // // Finalize microphone logging
-            // mic::stop();
+            // Finalize microphone logging
+            mic::stop();
 
-            // status = Status::TOUCHDOWN;
+            status = Status::TOUCHDOWN;
             return;
         }
 
@@ -963,7 +972,7 @@ void handleDescent() {
                 // Send exactly what was requested
                 if (reqTel) {
                     lora::sendTelemetry(loc, b.altitude);
-                    // delay(30);
+                    delay(100);
                 }
                 if (reqSci) {
                     lora::sendScience(s);
@@ -1485,17 +1494,30 @@ void handleDescent() {
 //TOUCHDOWN//
 void handleTouchdown() {
     static unsigned long lastPrint = 0;
-    //static unsigned long touchdownStartMs = 0;
     static bool debugged = false;
     static bool dataCollectionActive = true;  // flag to stop data collection
-    unsigned long now = millis();
-    logEventSummary();
+    static bool touchdownEntryLogged = false; // <-- NEW: run-once flag
 
-    // Record when we entered touchdown
+    unsigned long now = millis();
+
+    // Record when we entered touchdown (you already use touchdownStartMs below)
     if (touchdownStartMs == 0) {
         touchdownStartMs = now;
     }
-    
+
+    // --- RUN ONCE at the beginning of TOUCHDOWN ---
+    if (!touchdownEntryLogged) {
+        touchdownEntryLogged = true;
+
+        // If you want to make sure any pending samples are written first:
+        flash_flushToSD();
+
+        // Log the event timeline ONCE
+        logEventSummary();
+
+        Serial.println("[TOUCHDOWN] Event timeline logged once on entry");
+    }
+
     gnss::update();
     pm::update();
 
@@ -1506,7 +1528,7 @@ void handleTouchdown() {
     pm::Reading pmr = pm::read();
 
     gnss::Location loc = getEnrichedLocation(b.altitude);
-    
+
     // Build sample (always build, so we can use it for LoRa response)
     Sample s;
     s.timestampMs = getUnifiedTimestamp(loc.timestamp);
@@ -1522,17 +1544,18 @@ void handleTouchdown() {
         s.pm10_0 = -1;
         s.pm2_5  = -1;
     }
-    
+
     // Only store sample if data collection is still active
     if (dataCollectionActive) {
         flash_storeSample(s);
     }
-    
+
     // LoRa command handling (always listen for commands)
     uint8_t cmdByte = 0;
     bool command = lora::receiveCommand(cmdByte);
 
     if (command) {
+
         uint8_t team = cmdByte & 0x0F;
         if (team != (TEAM_ID & 0x0F)) {
             Serial.print("[CMD] Not for us, team="); Serial.println(team);
@@ -1556,7 +1579,7 @@ void handleTouchdown() {
 
         lastCommandMs = now;
         flash_flushToSD();
-        
+
         // STOP data collection after command received
         dataCollectionActive = false;
         Serial.println("[TOUCHDOWN] Data collection stopped after command");
@@ -1572,17 +1595,17 @@ void handleTouchdown() {
         Serial.println();
     }
 
-
     // Debug SD card after 3 seconds in touchdown (ensures data is flushed)
-    if (!debugged && (now - touchdownStartMs > 3000)) {
-        Serial.println("\n[TOUCHDOWN] Running SD card debug...\n");
-        flash_flushToSD();  // Make sure everything is written
-        delay(100);         // Give SD time to finish
-        logEventSummary();
-        // debugAfterRun();    // Shows everything + dumps current run
-        // debugged = true;
-    }
+    // if (!debugged && (now - touchdownStartMs > 3000)) {
+    //     Serial.println("\n[TOUCHDOWN] Running SD card debug...\n");
+    //     flash_flushToSD();  // Make sure everything is written
+    //     delay(100);         // Give SD time to finish
+    //     logEventSummary();
+    //     debugAfterRun();    // Shows everything + dumps current run
+    //     debugged = true;
+    // }
 }
+
 
 
     void loop() {                                           
