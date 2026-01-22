@@ -16,11 +16,12 @@ namespace actuator {
     // Force actuator into SAFE / UNDEPLOYED state
     // ------------------------------------------------
     void undeploy() {
-        digitalWrite(PIN_IN1, HIGH);
-        digitalWrite(PIN_IN2, LOW);
-        //analogWriteResolution(8);
-        //analogWriteFrequency(PIN_IN1, 20000);
-        //analogWrite(PIN_IN1, 128);
+        // digitalWrite(PIN_IN1, HIGH);
+        // digitalWrite(PIN_IN2, LOW);
+        // analogWriteResolution(8);
+        // analogWriteFrequency(PIN_IN1, 20000);
+        analogWrite(PIN_IN1, 128);
+        analogWrite(PIN_IN2, 0);
         active = false;
         actuatorDeployed = false;
         startTime = 0;
@@ -29,6 +30,9 @@ namespace actuator {
     void setup() {
         pinMode(PIN_IN1, OUTPUT);
         pinMode(PIN_IN2, OUTPUT);
+        analogWriteResolution(8);
+        analogWriteFrequency(PIN_IN1, 20000);
+        analogWriteFrequency(PIN_IN2, 20000);
 
         undeploy();  // <-- CRITICAL: force safe state on boot
     }
@@ -43,8 +47,14 @@ namespace actuator {
         actuatorDeployed = true;
         startTime = millis();
 
-        digitalWrite(PIN_IN1, LOW);
-        digitalWrite(PIN_IN2, HIGH);
+        // digitalWrite(PIN_IN1, LOW);
+        // digitalWrite(PIN_IN2, HIGH);
+        analogWrite(PIN_IN1, 0);
+        for (int speed = 0; speed < 255; speed += 10) {
+            analogWrite(PIN_IN2, speed);
+            delay(15);
+        }
+        // analogWrite(PIN_IN2, 255);
     }
 
     void update() {

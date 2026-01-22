@@ -72,9 +72,9 @@ int freefallAccelCount   = 0;
 int altitudeDropCount    = 0;
 
 // Thresholds 
-const float FREEFALL_ACCEL_THRESHOLD = 3.0f;   // m/s², magnitude below this = near freefall
+const float FREEFALL_ACCEL_THRESHOLD = 5.0f;   // m/s², magnitude below this = near freefall
 const float ALTITUDE_DROP_MIN        = 0.02f;   // meters drop between samples - set to 1 m between samples (which are sampled at 0.05 seconds)
-const int   FREEFALL_ACCEL_SAMPLES   = 10;     // consecutive samples detect freefalll
+const int   FREEFALL_ACCEL_SAMPLES   = 5;     // consecutive samples detect freefalll
 const int   ALTITUDE_DROP_SAMPLES    = 3;      // consecutive
 
 // For altitude trend

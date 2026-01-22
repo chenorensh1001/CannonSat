@@ -238,7 +238,8 @@ namespace lora {
         packInt24(lastLon, &packet[4]);
         packInt16(lastVel, &packet[7]);
         packUInt16((uint16_t)(bmpAltitude * 10.0), &packet[9]);
-        packUInt32(lastTs, &packet[11]);
+        uint32_t timestamp = millis() / 1000;
+        packUInt32(timestamp, &packet[11]);
         packet[15] = crc8_ccitt_07_msb(packet, 15);
 
         
@@ -316,12 +317,14 @@ namespace lora {
         }
 
         // ---------------------------
-        // Secondary payloads (bytes 26–46): 3 samples × 7 bytes
-        // Each sample: PM2.5(2) + PM10(2) + Pressure(2) + Temp(1)
+        // Secondary payloads (bytes 26–40): 3 samples × 5 bytes = 15 bytes
+        // Each sample: PM2.5(2) + Pressure(2) + Temp(1)
+        // PM10 REMOVED
+        // Bytes 41-45 remain zero (from memset)
         // ---------------------------
-        BmpSample s0{}, s7{}, s14{};
+        BmpSample s0{}, s4{}, s14{};
         bool ok0  = getSampleSecondsAgo(0,  s0);
-        bool ok7  = getSampleSecondsAgo(7,  s7);
+        bool ok4  = getSampleSecondsAgo(4,  s4);
         bool ok14 = getSampleSecondsAgo(14, s14);
 
         // Fallbacks if history not ready
@@ -331,10 +334,10 @@ namespace lora {
             s0.altitude    = -999;
             s0.verticalVelocity = 0;
         }
-        if (!ok7)  s7  = s0;
+        if (!ok4)  s4  = s0;
         if (!ok14) s14 = s0;
 
-        BmpSample samples[3] = { s0, s7, s14 };
+        BmpSample samples[3] = { s0, s4, s14 };
 
         auto encodeTemp = [](float tC) -> uint8_t {
             // 0.5°C resolution: enc = (tC + 25) * 2
@@ -358,20 +361,20 @@ namespace lora {
             return (uint16_t)(pm * 10.0f);
         };
 
+        // 3 samples × 5 bytes = 15 bytes (26-40)
+        // Bytes 41-45 will be padding (zeros from memset)
         for (int i = 0; i < 3; i++) {
-            uint8_t base = 26 + i * 7;
+            uint8_t base = 26 + i * 5;
 
-            // Use latest PM reading for all 3 timestamps
+            // Use latest PM2.5 reading for all 3 timestamps
             uint16_t pm25 = encodePM(s.pm2_5);
-            uint16_t pm10 = encodePM(s.pm10_0);
 
-            packUInt16(pm25, &packet[base + 0]);   // 26–27, 33–34, 40–41
-            packUInt16(pm10, &packet[base + 2]);   // 28–29, 35–36, 42–43
+            packUInt16(pm25, &packet[base + 0]);   // bytes 0-1: PM2.5
 
             int16_t pEnc = encodePressure(samples[i].pressure);
-            packInt16(pEnc, &packet[base + 4]);    // 30–31, 37–38, 44–45
+            packInt16(pEnc, &packet[base + 2]);    // bytes 2-3: Pressure
 
-            packet[base + 6] = encodeTemp(samples[i].temperature); // 32, 39, 46
+            packet[base + 4] = encodeTemp(samples[i].temperature); // byte 4: Temperature
         }
 
         // ---------------------------
@@ -385,7 +388,7 @@ namespace lora {
         };
 
         packUInt16(encodeAltitude(s0.altitude),  &packet[71]);
-        packUInt16(encodeAltitude(s7.altitude),  &packet[73]);
+        packUInt16(encodeAltitude(s4.altitude),  &packet[73]);
         packUInt16(encodeAltitude(s14.altitude), &packet[75]);
 
         int16_t velEnc = (int16_t)(s0.verticalVelocity * 100.0f);
@@ -413,31 +416,135 @@ namespace lora {
         }
         Serial.println("\n[DEBUG] =========================================");
 
+        // Header info
+        Serial.println("[DEBUG] Header:");
+        Serial.printf("  Packet ID: 0x%02X (Team=%d)\n", packet[0], packet[0] & 0x0F);
+        uint32_t timestamp = ((uint32_t)packet[1] << 24) | ((uint32_t)packet[2] << 16) | 
+                            ((uint32_t)packet[3] << 8) | packet[4];
+        Serial.printf("  Timestamp: %u seconds\n", timestamp);
+        Serial.printf("  Bitmap: 0x%02X (binary: 0b", packet[5]);
+        for (int i = 7; i >= 0; i--) {
+            Serial.print((packet[5] >> i) & 1);
+        }
+        Serial.println(")");
+
+        // Detonation events
         Serial.println("[DEBUG] Detonation events decoded:");
         for (int i = 0; i < 4; i++) {
             uint8_t base = 6 + i * 5;
-            uint8_t  t   = packet[base + 0];
+            int8_t   t   = (int8_t)packet[base + 0];  // Signed for negative relative time
             uint8_t  pk  = packet[base + 1];
             uint8_t  rms = packet[base + 2];
             uint16_t dur = (uint16_t)((packet[base + 3] << 8) | packet[base + 4]);
 
-            Serial.printf("  Ev%d: time=%u s, peak=%u, rms=%u, dur=%u ms\n",
-                        i + 1, t, pk, rms, dur);
+            Serial.printf("  Ev%d: time=%d s ago, peak=%u, rms=%u, dur=%u ms\n",
+                        i + 1, -t, pk, rms, dur);
         }
 
-        Serial.println("[DEBUG] Secondary payloads decoded (PM2.5, PM10, PressureEnc, TempEnc):");
+        // Secondary payloads - RAW VALUES
+        Serial.println("\n[DEBUG] ===== SECONDARY PAYLOAD - RAW VALUES =====");
+        
+        // Get the samples used in encoding
+        BmpSample s0{}, s4{}, s14{};
+        getSampleSecondsAgo(0,  s0);
+        getSampleSecondsAgo(4,  s4);
+        getSampleSecondsAgo(14, s14);
+        
+        BmpSample samples[3] = { s0, s4, s14 };
+        const char* sampleTimes[3] = { "0s ago", "4s ago", "14s ago" };
+
         for (int i = 0; i < 3; i++) {
-            uint8_t base = 26 + i * 7;
-            uint16_t pm25 = (uint16_t)((packet[base + 0] << 8) | packet[base + 1]);
-            uint16_t pm10 = (uint16_t)((packet[base + 2] << 8) | packet[base + 3]);
-            int16_t  pEnc = (int16_t)((packet[base + 4] << 8) | packet[base + 5]);
-            uint8_t  tEnc = packet[base + 6];
-
-            Serial.printf("  S%d: pm25=%u pm10=%u pEnc=%d tEnc=%u\n",
-                        i + 1, pm25, pm10, pEnc, tEnc);
+            Serial.printf("\n[DEBUG] Sample %d (%s) - RAW:\n", i + 1, sampleTimes[i]);
+            Serial.printf("  PM2.5:       %.2f µg/m³\n", s.pm2_5);
+            Serial.printf("  Pressure:    %.2f Pa\n", samples[i].pressure);
+            Serial.printf("  Temperature: %.2f °C\n", samples[i].temperature);
+            Serial.printf("  Altitude:    %.2f m\n", samples[i].altitude);
         }
 
+        // Secondary payloads - ENCODED VALUES
+        Serial.println("\n[DEBUG] ===== SECONDARY PAYLOAD - ENCODED VALUES =====");
+        
+        auto encodeTemp = [](float tC) -> uint8_t {
+            if (tC < -25.0f) tC = -25.0f;
+            if (tC > 102.5f) tC = 102.5f;
+            return (uint8_t)((tC + 25.0f) * 2.0f);
+        };
+
+        auto encodePressure = [](float pPa) -> int16_t {
+            float x = (pPa - 101325.0f) / 50.0f;
+            if (x < -32768.0f) x = -32768.0f;
+            if (x >  32767.0f) x =  32767.0f;
+            return (int16_t)x;
+        };
+
+        auto encodePM = [](float pm) -> uint16_t {
+            if (pm < 0) return 0;
+            if (pm > 6553.5f) pm = 6553.5f;
+            return (uint16_t)(pm * 10.0f);
+        };
+
+        for (int i = 0; i < 3; i++) {
+            uint8_t base = 26 + i * 5;
+            uint16_t pm25 = (uint16_t)((packet[base + 0] << 8) | packet[base + 1]);
+            int16_t  pEnc = (int16_t)((packet[base + 2] << 8) | packet[base + 3]);
+            uint8_t  tEnc = packet[base + 4];
+
+            // Calculate what the encoded values SHOULD be
+            uint16_t pm25_expected = encodePM(s.pm2_5);
+            int16_t  pEnc_expected = encodePressure(samples[i].pressure);
+            uint8_t  tEnc_expected = encodeTemp(samples[i].temperature);
+
+            Serial.printf("\n[DEBUG] Sample %d (%s) - ENCODED:\n", i + 1, sampleTimes[i]);
+            Serial.printf("  PM2.5 encoded:       %u (0x%04X) [expected: %u]\n", 
+                        pm25, pm25, pm25_expected);
+            Serial.printf("  Pressure encoded:    %d (0x%04X) [expected: %d]\n", 
+                        pEnc, (uint16_t)pEnc, pEnc_expected);
+            Serial.printf("  Temperature encoded: %u (0x%02X) [expected: %u]\n", 
+                        tEnc, tEnc, tEnc_expected);
+            
+            // Decode back to verify
+            float pm25_decoded = pm25 / 10.0f;
+            float pEnc_decoded = (pEnc * 50.0f) + 101325.0f;
+            float tEnc_decoded = (tEnc / 2.0f) - 25.0f;
+            
+            Serial.printf("  Decoded back:\n");
+            Serial.printf("    PM2.5:       %.2f µg/m³\n", pm25_decoded);
+            Serial.printf("    Pressure:    %.2f Pa\n", pEnc_decoded);
+            Serial.printf("    Temperature: %.2f °C\n", tEnc_decoded);
+            
+            // Check for padding bytes
+            Serial.printf("  Bytes in packet: [%02X %02X] [%02X %02X] [%02X]\n",
+                        packet[base + 0], packet[base + 1],
+                        packet[base + 2], packet[base + 3],
+                        packet[base + 4]);
+        }
+
+        // Show padding section
+        Serial.println("\n[DEBUG] Padding (bytes 41-45):");
+        Serial.printf("  [%02X %02X %02X %02X %02X]\n",
+                    packet[41], packet[42], packet[43], packet[44], packet[45]);
+
+        // Telemetry data
+        Serial.println("\n[DEBUG] Telemetry Data (bytes 71-78):");
+        uint16_t alt0  = (uint16_t)((packet[71] << 8) | packet[72]);
+        uint16_t alt4  = (uint16_t)((packet[73] << 8) | packet[74]);
+        uint16_t alt14 = (uint16_t)((packet[75] << 8) | packet[76]);
+        int16_t  vel   = (int16_t)((packet[77] << 8) | packet[78]);
+
+        Serial.printf("  Altitude 0s:  %u (0x%04X) → %.1f m\n", alt0, alt0, alt0 / 10.0f);
+        Serial.printf("  Altitude 4s:  %u (0x%04X) → %.1f m\n", alt4, alt4, alt4 / 10.0f);
+        Serial.printf("  Altitude 14s: %u (0x%04X) → %.1f m\n", alt14, alt14, alt14 / 10.0f);
+        Serial.printf("  Velocity:     %d (0x%04X) → %.2f m/s\n", vel, (uint16_t)vel, vel / 100.0f);
+
+        // CRC
         uint8_t crcCalc = crc8_ccitt_07_msb(packet, 79);
-        Serial.printf("[DEBUG] CRC byte=0x%02X | CRC recalculated=0x%02X\n", packet[79], crcCalc);
+        Serial.printf("\n[DEBUG] CRC: RX=0x%02X | CALC=0x%02X ", packet[79], crcCalc);
+        if (packet[79] == crcCalc) {
+            Serial.println("✓ OK");
+        } else {
+            Serial.println("✗ MISMATCH!");
+        }
     }
+
+
 } //namspace lora
