@@ -13,7 +13,7 @@ static constexpr uint8_t D9_HEADER_1 = 0x4D;
 static constexpr uint8_t D9_FRAME_LEN_0 = 0x00;
 static constexpr uint8_t D9_FRAME_LEN_1 = 0x1C;
 static constexpr int D9_PACKET_SIZE = 32;
-static constexpr uint32_t D9_SENSOR_TIMEOUT_MS = 900;  // 2 seconds to get a packet
+static constexpr uint32_t D9_SENSOR_TIMEOUT_MS = 10;  // 2 seconds to get a packet
 
 // Circular buffer for D9 packets
 static constexpr int D9_BUFFER_SIZE = 2;

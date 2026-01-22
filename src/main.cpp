@@ -501,7 +501,7 @@ void processSoundEvents() {
 
             // 3) LOUD EVENT DETECTION
             if (absVal > SOUND_THRESHOLD) {
-                Serial.println("----- EVENT DETECTED-----");
+                // Serial.println("----- EVENT DETECTED-----");
                 lastLoudSampleTime = now;
 
                 if (!isEventActive) {
@@ -608,7 +608,6 @@ void debugPrintGnss(const gnss::Location& loc) {
 }
 // TinyGPSPlus gps;
 
-
 //SETUP//
 void setup() {
     Serial.begin(9600);
@@ -679,10 +678,8 @@ void setup() {
     actuator::setup();
     logResult("actuator::setup()", true);
 
-
     logStep("actuator::undeploy()");
     // actuator::trigger();
-
     // delay(10000);
     actuator::undeploy();
     logResult("actuator::undeploy()", true);
@@ -692,10 +689,24 @@ void setup() {
     logResult("mic::setup()", true);
 
     if (!ok) {
-        Serial.println("[SETUP] ERROR: One or more subsystems failed. Blinking forever.");
+        Serial.println("[SETUP] ERROR: One or more subsystems failed.");
+        Serial.println("[SETUP] Press RESET button to reboot, or wait indefinitely...");
         interface::startSystemBlinking();
+        
         while (1) {
+            interface::update();  // Update button states
             interface::serviceBlink();
+            
+            // Check for reset button
+            if (interface::resetPressed()) {
+                Serial.println("[SETUP] RESET button pressed - rebooting...");
+                Serial.flush();
+                delay(100);
+                
+                // Perform hardware reset
+                SCB_AIRCR = 0x05FA0004;  // ARM Cortex-M7 reset command
+            }
+            
             delay(10);
         }
     }
@@ -704,8 +715,7 @@ void setup() {
     Serial.println("[SETUP] setup finished OK");
 }
 
-
-
+//ACTIVE// 
 //ACTIVE// 
 void handleActive() {
     static bool armedLatched = false;   // prevents re-arming logic from running again
@@ -722,10 +732,10 @@ void handleActive() {
 
     mic::discardBuffer();
 
-    // If ARM button pressed -> go ARMED and turn on yellow LED
+    // If ARM button pressed -> go DESCENT and turn off yellow LED
     if (interface::armPressed()) {
         unsigned long now = millis();
-        Serial.println("[ACTIVE] ARM button pressed -> ARMED");
+        Serial.println("[ACTIVE] ARM button pressed -> DESCENT");
         status = Status::DESCENT;
         descentStartMs = millis();                 
         freefallAccelCount = 0;          
@@ -734,6 +744,7 @@ void handleActive() {
         interface::setArmedLed(false);
     }
 }
+
    
 void handleDescent() {
     static uint32_t lastHzTick  = 0;
@@ -754,7 +765,7 @@ void handleDescent() {
     static bool deploymentTriggered = false;
     static uint32_t freefallStartMs = 0;
     static const float FREEFALL_ACCEL_THRESHOLD = 3.0;
-    static const uint32_t FREEFALL_DURATION_MS = 1000;
+    static const uint32_t FREEFALL_DURATION_MS = 100;
 
     uint32_t now = millis();
     bool descentTimeOk = (descentStartMs != 0) && (now - descentStartMs >= MIN_DESCENT_TIME_MS);
@@ -952,6 +963,7 @@ void handleDescent() {
                 // Send exactly what was requested
                 if (reqTel) {
                     lora::sendTelemetry(loc, b.altitude);
+                    // delay(30);
                 }
                 if (reqSci) {
                     lora::sendScience(s);
@@ -1573,39 +1585,30 @@ void handleTouchdown() {
 }
 
 
-void loop() {
-    // Feed GNSS heavily before running any state logic so we get some samples
-    for (int i = 0; i < 50; i++) {
+    void loop() {                                           
+    for (int i = 0; i < 50; i++) {                     
         gnss::update();
-    }
+    }                                                 
 
     actuator::update();
     interface::update();
 
-    // RESET works from any state - HARDWARE RESET
-    if (interface::resetPressed()) {
+    if (interface::resetPressed() && status == Status::ACTIVE) {  // Opening brace 3
         Serial.println("RESET BUTTON PRESSED - REBOOTING...");
-        
-        // Close files cleanly before reset
         sd::closeDescentLog();
         sd::closeMicLogs();
-        
-        Serial.flush();  // Ensure message is sent
-        delay(100);      // Give time for cleanup
-        
-        // Perform hardware reset
-        SCB_AIRCR = 0x05FA0004;  // ARM Cortex-M7 reset command
-        // Program will restart from setup()
-    }
+        Serial.flush();
+        delay(100);
+        SCB_AIRCR = 0x05FA0004;
+    }                                                    
 
-    // Status
-    switch (status) {
+    switch (status) {                                   
         case Status::ACTIVE:    handleActive();    break;
-        // case Status::ARMED:     handleArmed();     break;
         case Status::DESCENT:   handleDescent();   break;
         case Status::TOUCHDOWN: handleTouchdown(); break;
-    }
-}
+    }                                                    
+}                                                        
+
 
 // void setup() {
 //     Serial.begin(9600);
