@@ -1490,53 +1490,49 @@ void handleDescent() {
 //         Serial.println(descentTimeOk ? "YES" : "NO");
 //     }
 // }
-
 //TOUCHDOWN//
 void handleTouchdown() {
     static unsigned long lastPrint = 0;
-    static bool debugged = false;
-    static bool dataCollectionActive = true;  // flag to stop data collection
-    static bool touchdownEntryLogged = false; // <-- NEW: run-once flag
+    static bool dataCollectionActive = true;
+    static bool touchdownEntryLogged = false;
 
     unsigned long now = millis();
 
-    // Record when we entered touchdown (you already use touchdownStartMs below)
-    if (touchdownStartMs == 0) {
-        touchdownStartMs = now;
-    }
+    if (touchdownStartMs == 0) touchdownStartMs = now;
 
-    // --- RUN ONCE at the beginning of TOUCHDOWN ---
     if (!touchdownEntryLogged) {
         touchdownEntryLogged = true;
-
-        // If you want to make sure any pending samples are written first:
         flash_flushToSD();
-
-        // Log the event timeline ONCE
         logEventSummary();
-
         Serial.println("[TOUCHDOWN] Event timeline logged once on entry");
     }
 
     gnss::update();
-    pm::update();
 
-    // Read sensors (always read, even if not storing)
+    // Read sensors needed for LoRa response
     bmp::Reading b = bmp::read();
     sensors_event_t accel, gyro, mag, temp;
     imu::read(accel, gyro, mag, temp);
-    pm::Reading pmr = pm::read();
+
+    // PM only while collecting (avoid timeouts spam)
+    pm::Reading pmr;
+    if (dataCollectionActive) {
+        pm::update();
+        pmr = pm::read();
+    } else {
+        pmr.valid = false;
+        pmr.pm10_0 = -1;
+        pmr.pm2_5  = -1;
+    }
 
     gnss::Location loc = getEnrichedLocation(b.altitude);
 
-    // Build sample (always build, so we can use it for LoRa response)
     Sample s;
     s.timestampMs = getUnifiedTimestamp(loc.timestamp);
     s.temperature = b.temperature;
     s.pressure    = b.pressure;
     s.altitude    = b.altitude;
 
-    // Add PM readings
     if (pmr.valid) {
         s.pm10_0 = pmr.pm10_0;
         s.pm2_5  = pmr.pm2_5;
@@ -1545,17 +1541,14 @@ void handleTouchdown() {
         s.pm2_5  = -1;
     }
 
-    // Only store sample if data collection is still active
     if (dataCollectionActive) {
         flash_storeSample(s);
     }
 
-    // LoRa command handling (always listen for commands)
     uint8_t cmdByte = 0;
     bool command = lora::receiveCommand(cmdByte);
 
     if (command) {
-
         uint8_t team = cmdByte & 0x0F;
         if (team != (TEAM_ID & 0x0F)) {
             Serial.print("[CMD] Not for us, team="); Serial.println(team);
@@ -1567,45 +1560,30 @@ void handleTouchdown() {
         bool reqSci = (cmdByte & (1u << 4));
         bool reqTel = (cmdByte & (1u << 5));
 
-        delay(60); // >= 50 ms
+        delay(60);
 
-        if (reqTel) {
-            lora::sendTelemetry(loc, b.altitude);
-        }
-        if (reqSci) {
-            // Use current sample for science response
-            lora::sendScience(s);
-        }
+        if (reqTel) lora::sendTelemetry(loc, b.altitude);
+        if (reqSci) lora::sendScience(s);
 
         lastCommandMs = now;
         flash_flushToSD();
 
         // STOP data collection after command received
         dataCollectionActive = false;
+
+        // OPTIONAL: stop PM hardware to prevent any further reads/timeouts
+        pm::stop();
+
         Serial.println("[TOUCHDOWN] Data collection stopped after command");
     }
 
-    // Non-blocking tick
     if (now - lastPrint > 1000) {
         lastPrint = now;
         Serial.print("[TOUCHDOWN] tick");
-        if (!dataCollectionActive) {
-            Serial.print(" (data collection STOPPED)");
-        }
+        if (!dataCollectionActive) Serial.print(" (data collection STOPPED)");
         Serial.println();
     }
-
-    // Debug SD card after 3 seconds in touchdown (ensures data is flushed)
-    // if (!debugged && (now - touchdownStartMs > 3000)) {
-    //     Serial.println("\n[TOUCHDOWN] Running SD card debug...\n");
-    //     flash_flushToSD();  // Make sure everything is written
-    //     delay(100);         // Give SD time to finish
-    //     logEventSummary();
-    //     debugAfterRun();    // Shows everything + dumps current run
-    //     debugged = true;
-    // }
 }
-
 
 
     void loop() {                                           
