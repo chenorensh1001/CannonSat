@@ -306,11 +306,13 @@ namespace lora {
             uint8_t base = 6 + i * 5;
 
             // USE e[0] (eventMillis) only for the calculation of relative time
-            int32_t diff = ((int32_t)ev[i].eventMillis - (int32_t)now) / 1000;
-            int8_t relativeTime = (int8_t)constrain(diff, -128, 0); //because relative time always negative
+            uint32_t diffMs = now - ev[i].eventMillis;
 
-            // PACKING into LoRa Packet:
-            packet[base + 0] = (uint8_t)relativeTime;      // How many seconds ago
+            // 2. Convert to seconds. 
+            uint32_t diffSec = diffMs / 1000;
+            
+            // Packing into LORA packet
+            packet[base + 0] = (uint8_t)constrain(diffSec, 0, 255); // relative time
             packet[base + 1] = ev[i].peak;                 // e[2]
             packet[base + 2] = ev[i].rms;                  // e[3]
             packUInt16(ev[i].duration, &packet[base + 3]); // e[4]
@@ -546,5 +548,62 @@ namespace lora {
         }
     }
 
+    void debugTelemetryPacket(const gnss::Location& loc, float bmpAltitude) {
+        uint8_t packet[16];
+        buildTelemetryPacket(packet, loc, bmpAltitude);
+
+        Serial.println("\n[DEBUG] ===== TELEMETRY PACKET (RAW 16 BYTES) =====");
+        for (int i = 0; i < 16; i++) {
+            if (packet[i] < 0x10) Serial.print("0");
+            Serial.print(packet[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println("\n[DEBUG] =========================================");
+
+        // Decode header
+        Serial.println("[DEBUG] Header:");
+        Serial.printf("  Packet ID: 0x%02X (Team=%d)\n", packet[0], packet[0] & 0x0F);
+
+        // Decode latitude (bytes 1-3)
+        int32_t lat = ((int32_t)packet[1] << 16) | ((int32_t)packet[2] << 8) | packet[3];
+        if (lat & 0x800000) lat |= 0xFF000000; // Sign extend
+        Serial.printf("  Latitude (raw): %d → %.5f°\n", lat, lat / 100000.0);
+
+        // Decode longitude (bytes 4-6)
+        int32_t lon = ((int32_t)packet[4] << 16) | ((int32_t)packet[5] << 8) | packet[6];
+        if (lon & 0x800000) lon |= 0xFF000000; // Sign extend
+        Serial.printf("  Longitude (raw): %d → %.5f°\n", lon, lon / 100000.0);
+
+        // Decode velocity (bytes 7-8)
+        int16_t vel = (int16_t)((packet[7] << 8) | packet[8]);
+        Serial.printf("  Velocity (raw): %d → %.2f m/s\n", vel, vel / 100.0);
+
+        // Decode altitude (bytes 9-10)
+        uint16_t alt = (uint16_t)((packet[9] << 8) | packet[10]);
+        Serial.printf("  Altitude (raw): %u → %.1f m\n", alt, alt / 10.0);
+
+        // Decode timestamp (bytes 11-14)
+        uint32_t timestamp = ((uint32_t)packet[11] << 24) | ((uint32_t)packet[12] << 16) | 
+                            ((uint32_t)packet[13] << 8) | packet[14];
+        Serial.printf("  Timestamp: %u seconds\n", timestamp);
+
+        // CRC
+        uint8_t crcCalc = crc8_ccitt_07_msb(packet, 15);
+        Serial.printf("[DEBUG] CRC: RX=0x%02X | CALC=0x%02X ", packet[15], crcCalc);
+        if (packet[15] == crcCalc) {
+            Serial.println("✓ OK");
+        } else {
+            Serial.println("✗ MISMATCH!");
+        }
+
+        // Input values
+        Serial.println("\n[DEBUG] Input values used:");
+        Serial.printf("  GPS Latitude: %.6f° (valid=%d)\n", loc.latitude, loc.valid);
+        Serial.printf("  GPS Longitude: %.6f° (valid=%d)\n", loc.longitude, loc.valid);
+        Serial.printf("  GPS Velocity: %.2f m/s\n", loc.verticalVelocity);
+        Serial.printf("  GPS Timestamp: %u\n", (uint32_t)loc.timestamp);
+        Serial.printf("  BMP Altitude: %.2f m\n", bmpAltitude);
+        Serial.println("[DEBUG] =========================================\n");
+    }
 
 } //namspace lora

@@ -40,5 +40,7 @@ namespace lora {
 
     // Debug: build + print science packet (raw + decoded)
     void debugSciencePacket(const Sample& s);   
+    void debugTelemetryPacket(const gnss::Location& loc, float bmpAltitude);  // ← ADD THIS LINE
+
 
 }
