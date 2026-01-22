@@ -86,8 +86,8 @@ Location read() {
         loc.timestamp = 0;
     }
 
-    Serial1.println("[GNSS DEBUG] returning timestamp = "); 
-    Serial.println(loc.timestamp);
+    // Serial1.println("[GNSS DEBUG] returning timestamp = "); 
+    // Serial.println(loc.timestamp);
     return loc;
 }
 

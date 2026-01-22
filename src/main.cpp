@@ -196,22 +196,22 @@ void flash_storeSample(const Sample& s) {
     if (sampleBufferIndex < SAMPLE_BUFFER_SIZE) {
         sampleBuffer[sampleBufferIndex++] = s;
 
-        // Serial.print("Buffered sample ");
-        // Serial.print(sampleBufferIndex);
-        // Serial.print(": t=");
-        // Serial.print(s.timestampMs);
-        // Serial.print(" ms, T=");
-        // Serial.print(s.temperature);
-        // Serial.print(" C, P=");
-        // Serial.print(s.pressure);
-        // Serial.print(" Pa, Alt=");
-        // Serial.print(s.altitude);
-        // Serial.println(" m");
-        // Serial.print(", PM10=");
-        // Serial.print(s.pm10_0);
-        // Serial.print(" ug/m3, PM2.5=");
-        // Serial.print(s.pm2_5);
-        // Serial.println(" ug/m3");
+        Serial.print("Buffered sample ");
+        Serial.print(sampleBufferIndex);
+        Serial.print(": t=");
+        Serial.print(s.timestampMs);
+        Serial.print(" ms, T=");
+        Serial.print(s.temperature);
+        Serial.print(" C, P=");
+        Serial.print(s.pressure);
+        Serial.print(" Pa, Alt=");
+        Serial.print(s.altitude);
+        Serial.println(" m");
+        Serial.print(", PM10=");
+        Serial.print(s.pm10_0);
+        Serial.print(" ug/m3, PM2.5=");
+        Serial.print(s.pm2_5);
+        Serial.println(" ug/m3");
 
 
     } else {
@@ -611,7 +611,7 @@ void debugPrintGnss(const gnss::Location& loc) {
 //SETUP//
 void setup() {
     Serial.begin(100000);
-    Serial1.begin(100000);
+    //Serial1.begin(100000);
     delay(1000);
     Serial.println("hello");
     systemStartMs = millis();
@@ -781,7 +781,7 @@ void handleDescent() {
 
     // HIGH-FREQUENCY POLLING (runs every loop)
     gnss::update();
-    pm::update();
+    // pm::update();
     processSoundEvents();
 
     // FREEFALL DETECTION (only if not already deployed)
@@ -894,6 +894,14 @@ void handleDescent() {
 
         // PM SENSOR (2-second sampling)
         bool pmReady = false;
+        pm::Reading newPmr;
+        while (pm::poll(newPmr)) {            // will usually run 0 or 1 times
+            lastPmReading = newPmr;           // keep newest
+            pmReady = true;
+            Serial.println("Received PM value");
+        }
+        /*
+        bool pmReady = false;
         if (now - lastPmRead >= 2000) {
             lastPmRead = now;
 
@@ -904,7 +912,7 @@ void handleDescent() {
             } else {
                 Serial.println("[DESCENT] PM read failed");
             }
-        }
+        }*/
 
         if (!b.valid) {
             Serial.println("[DESCENT] BMP read failed");
@@ -929,7 +937,7 @@ void handleDescent() {
             s.pm2_5  = lastPmReading.valid ? lastPmReading.pm2_5  : -1;
             s.pm10_0 = lastPmReading.valid ? lastPmReading.pm10_0 : -1;
         }
-
+        debugPrintGnss(loc);
         flash_storeSample(s);
 
         // Touchdown detection (only after minimum descent time)
@@ -1041,7 +1049,7 @@ void handleDescent() {
 }
 
 // //ARMED//
-// void handleArmed() {
+// void handleArmed() {const
 //     unsigned long now = millis();
 
 //     //  freefall timing condition
@@ -1515,6 +1523,7 @@ void handleTouchdown() {
     imu::read(accel, gyro, mag, temp);
 
     // PM only while collecting (avoid timeouts spam)
+    /*
     pm::Reading pmr;
     if (dataCollectionActive) {
         pm::update();
@@ -1523,6 +1532,14 @@ void handleTouchdown() {
         pmr.valid = false;
         pmr.pm10_0 = -1;
         pmr.pm2_5  = -1;
+    }*/
+    pm::Reading pmr;
+    bool pmReady = false;
+    pm::Reading newPmr;
+    while (pm::poll(newPmr)) {            // will usually run 0 or 1 times
+        pmr = newPmr;           // keep newest
+        pmReady = true;
+        Serial.println("Received PM value");
     }
 
     gnss::Location loc = getEnrichedLocation(b.altitude);
@@ -1542,7 +1559,7 @@ void handleTouchdown() {
     }
 
     if (dataCollectionActive) {
-        flash_storeSample(s);
+        // flash_storeSample(s);
     }
 
     uint8_t cmdByte = 0;
