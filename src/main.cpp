@@ -469,24 +469,40 @@ void processSoundEvents() {
     static double sumSquares = 0;
     static uint32_t sampleCount = 0;
 
+
     // Continuous 2kHz Downsampling
     static uint8_t downsampleCounter = 0;
     const uint8_t DOWNSAMPLE_FACTOR = 22;
 
+
+    // Logic for 2-strike activation
+    static uint8_t strikeCount = 0;
+    static bool belowThresholdSinceLastStrike = true; // Require signal to drop before next strike
+
+
+    // Zero-crossing rate for frequency content estimation
+    static uint16_t zeroCrossings = 0;
+    static int16_t prevSign = 0;
+
+
     // Tunables
-    const int SOUND_THRESHOLD = 583; // corresponds to 81dB SPL, 75dB SPL is 292
+    const int SOUND_THRESHOLD = 292; // 368 corresponds to 81dB SPL, 75dB SPL is 292
     const uint32_t COOLDOWN_MS = 50;
 
+
     int16_t tempBuffer[128];
+
 
     // Read all available samples
     while (mic::availableSamples() > 0) {
         size_t readCount = mic::readBuffer(tempBuffer, 128);
         uint32_t now = millis();
 
+
         for (size_t i = 0; i < readCount; i++) {
             int16_t sample = tempBuffer[i];
             uint16_t absVal = (uint16_t)abs(sample);
+
 
             // 1) RAW 2kHz LOGGING (downsample from 44.1kHz -> ~2kHz)
             downsampleCounter++;
@@ -496,51 +512,110 @@ void processSoundEvents() {
                 downsampleCounter = 0;
             }
 
-            // 2) PEAK TRACKING
-            if ((int16_t)absVal > eventMaxPeak) eventMaxPeak = (int16_t)absVal;
 
-            // 3) LOUD EVENT DETECTION
+            // 2) PEAK TRACKING
+            if (isEventActive && (int16_t)absVal > eventMaxPeak) eventMaxPeak = (int16_t)absVal;
+
+
+            // 3) ZERO-CROSSING DETECTION (approximates dominant frequency)
+            if (isEventActive) {
+                int16_t currSign = (sample >= 0) ? 1 : -1;
+                if (currSign != prevSign) {
+                    zeroCrossings++;
+                }
+                prevSign = currSign;
+            }
+
+
+            // 4) TRACK WHEN SIGNAL DROPS BELOW THRESHOLD
+            if (absVal < SOUND_THRESHOLD) {
+                belowThresholdSinceLastStrike = true;
+            }
+
+
+            // 5) LOUD EVENT DETECTION
             if (absVal > SOUND_THRESHOLD) {
-                // Serial.println("----- EVENT DETECTED-----");
                 lastLoudSampleTime = now;
 
+
                 if (!isEventActive) {
-                    isEventActive = true;
-                    eventStartTime = now;
-                    sumSquares = 0.0;
-                    sampleCount = 0;
+                    // Only count as a new strike if signal dropped below threshold since last strike
+                    if (belowThresholdSinceLastStrike) {
+                        strikeCount++;
+                        belowThresholdSinceLastStrike = false; // Reset flag
+                       
+                        if (strikeCount == 2) {
+                            isEventActive = true;
+                            eventStartTime = now;
+                            sumSquares = 0.0;
+                            sampleCount = 0;
+                            eventMaxPeak = (int16_t)absVal;
+                            zeroCrossings = 0; // Reset zero-crossing counter for new event
+                            prevSign = (sample >= 0) ? 1 : -1; // Initialize sign tracking
+                        }
+                    }
                 }
 
-                sumSquares += (double)sample * (double)sample;
-                sampleCount++;
+
+                if (isEventActive) {
+                    sumSquares += (double)sample * (double)sample;
+                    sampleCount++;
+                }
             }
         }
     }
 
-    // 4) LOG SUMMARY EVENT TO SD (after cooldown)
+
+    // 6) LOG SUMMARY EVENT TO SD (after cooldown)
     uint32_t now = millis();
     if (isEventActive && (now - lastLoudSampleTime > COOLDOWN_MS)) {
         if (sampleCount == 0) {
             isEventActive = false;
+            strikeCount = 0;
             eventMaxPeak = 0;
+            zeroCrossings = 0;
+            belowThresholdSinceLastStrike = true;
             return;
         }
+
 
         DetonationEvent e;
         e.eventMillis = (uint32_t)(eventStartTime); //aboslute time reference in milliseconds
         e.eventTime = (uint8_t)((eventStartTime - activeStartMs) / 1000); // absolute time
         e.peak      = (uint8_t)(eventMaxPeak / 128);
         e.rms       = (uint8_t)(sqrt(sumSquares / (double)sampleCount) / 128);
-        e.duration  = (uint16_t)(lastLoudSampleTime - eventStartTime);
+       
+        uint32_t dur = lastLoudSampleTime - eventStartTime;
+        e.duration  = (uint16_t)((dur == 0) ? 1 : dur);
+        // Serial.println("----- EVENT DETECTED-----");
+
 
         // Write event summary to already-open mic event file
-        char line[64];
-        snprintf(line, sizeof(line), "%u,%u,%u,%u", e.eventMillis, e.peak, e.rms, e.duration);
+        // Added zeroCrossings to the end of the SD log line
+        char line[80];
+        snprintf(line, sizeof(line), "%lu,%u,%u,%u,%u",
+                 e.eventMillis, e.peak, e.rms, e.duration,
+                 zeroCrossings);   // zero-crossings indicates frequency content (higher = more high-frequency)
         sd::writeMicEventLine(line);
 
+        Serial.println("----- EVENT DETECTED -----");
+        Serial.print("eventMillis: "); Serial.println(e.eventMillis);
+        Serial.print("peak: "); Serial.println(e.peak);
+        Serial.print("rms: "); Serial.println(e.rms);
+        Serial.print("duration: "); Serial.println(e.duration);
+        Serial.print("zeroCrossings: "); Serial.println(zeroCrossings);
+        Serial.println("--------------------------");
+
         isEventActive = false;
+        strikeCount = 0;
         eventMaxPeak = 0;
+        zeroCrossings = 0;
+        belowThresholdSinceLastStrike = true;
         pushDetonationEvent(e);
+    }
+    else if (!isEventActive && strikeCount > 0 && (now - lastLoudSampleTime > COOLDOWN_MS)) {
+        strikeCount = 0;
+        belowThresholdSinceLastStrike = true;
     }
 }
 
@@ -596,16 +671,16 @@ void flash_flushToSD() {
 //QA + DEUBGGING FUNCTIONS
 
 //DEBUG GNSS
-void debugPrintGnss(const gnss::Location& loc) {
-    Serial.println("----- GNSS DEBUG -----");
-    Serial.print("Valid: "); Serial.println(loc.valid ? "YES" : "NO");
-    Serial.print("Timestamp: "); Serial.println(loc.timestamp);
-    Serial.print("Lat: "); Serial.println(loc.latitude, 6);
-    Serial.print("Lon: "); Serial.println(loc.longitude, 6);
-    Serial.print("Alt: "); Serial.println(loc.altitude);
-    Serial.print("Vel (vertical): "); Serial.println(loc.verticalVelocity);
-    Serial.println("----------------------");
-}
+// void debugPrintGnss(const gnss::Location& loc) {
+//     Serial.println("----- GNSS DEBUG -----");
+//     Serial.print("Valid: "); Serial.println(loc.valid ? "YES" : "NO");
+//     Serial.print("Timestamp: "); Serial.println(loc.timestamp);
+//     Serial.print("Lat: "); Serial.println(loc.latitude, 6);
+//     Serial.print("Lon: "); Serial.println(loc.longitude, 6);
+//     Serial.print("Alt: "); Serial.println(loc.altitude);
+//     Serial.print("Vel (vertical): "); Serial.println(loc.verticalVelocity);
+//     Serial.println("----------------------");
+// }
 // TinyGPSPlus gps;
 
 //SETUP//
@@ -725,7 +800,6 @@ void setup() {
 }
 
 //ACTIVE// 
-//ACTIVE// 
 void handleActive() {
     static bool armedLatched = false;   // prevents re-arming logic from running again
     unsigned long now = millis();
@@ -739,7 +813,7 @@ void handleActive() {
         Serial.println(" ms");
     }
 
-    mic::discardBuffer();
+    // mic::discardBuffer();
 
     // If ARM button pressed -> go DESCENT and turn off yellow LED
     if (interface::armPressed()) {
@@ -754,8 +828,7 @@ void handleActive() {
     }
 }
 
-   
-void handleDescent() {
+ void handleDescent() {
     static uint32_t lastHzTick  = 0;
     static uint32_t lastPrint   = 0;
     static uint32_t lastFlushMs = 0;
@@ -808,119 +881,119 @@ void handleDescent() {
 
     
     // FREEFALL DETECTION (only if not already deployed)
-if (!deploymentTriggered) {
-    sensors_event_t accel, gyro, mag, temp;
-    imu::read(accel, gyro, mag, temp);
-    
-    float ax = accel.acceleration.x;
-    float ay = accel.acceleration.y;
-    float az = accel.acceleration.z;
-    float accelMag = sqrt(ax*ax + ay*ay + az*az);
+    if (!deploymentTriggered) {
+        sensors_event_t accel, gyro, mag, temp;
+        imu::read(accel, gyro, mag, temp);
+        
+        float ax = accel.acceleration.x;
+        float ay = accel.acceleration.y;
+        float az = accel.acceleration.z;
+        float accelMag = sqrt(ax*ax + ay*ay + az*az);
 
-    // Calculate altitude drop over 30-second window
-    float oldestAltitude = 0;
-    float newestAltitude = 0;
-    uint32_t oldestTime = 0;
-    uint32_t newestTime = 0;
+        // Calculate altitude drop over 30-second window
+        float oldestAltitude = 0;
+        float newestAltitude = 0;
+        uint32_t oldestTime = 0;
+        uint32_t newestTime = 0;
 
-    // Find oldest and newest valid readings within time window
-    for (int i = 0; i < 2; i++) {
-        if (altitudeTimeWindow[i] > 0 && now - altitudeTimeWindow[i] <= ALTITUDE_WINDOW_TIME) {
-            if (altitudeTimeWindow[i] < oldestTime || oldestTime == 0) {
-                oldestTime = altitudeTimeWindow[i];
-                oldestAltitude = altitudeWindow[i];
+        // Find oldest and newest valid readings within time window
+        for (int i = 0; i < 2; i++) {
+            if (altitudeTimeWindow[i] > 0 && now - altitudeTimeWindow[i] <= ALTITUDE_WINDOW_TIME) {
+                if (altitudeTimeWindow[i] < oldestTime || oldestTime == 0) {
+                    oldestTime = altitudeTimeWindow[i];
+                    oldestAltitude = altitudeWindow[i];
+                }
+                if (altitudeTimeWindow[i] > newestTime) {
+                    newestTime = altitudeTimeWindow[i];
+                    newestAltitude = altitudeWindow[i];
+                }
             }
-            if (altitudeTimeWindow[i] > newestTime) {
-                newestTime = altitudeTimeWindow[i];
-                newestAltitude = altitudeWindow[i];
-            }
-        }
-    }
-    
-    float altitudeDrop = oldestAltitude - newestAltitude;
-    uint32_t timeDelta = newestTime - oldestTime;
-    bool altitudeDropOk = (altitudeDrop >= MIN_ALTITUDE_DROP_RATE) && (timeDelta >= 800);  // At least 800ms of data
-
-    if (accelMag < FREEFALL_ACCEL_THRESHOLD) {
-        if (freefallStartMs == 0) {
-            freefallStartMs = now;
-            Serial.println("[FREEFALL] Freefall detected, starting timer");
-            Serial.print("[FREEFALL] Accel magnitude: ");
-            Serial.print(accelMag);
-            Serial.println(" m/s²");
         }
         
-        // Check BOTH freefall duration AND altitude drop rate
-        if (now - freefallStartMs >= FREEFALL_DURATION_MS) {
-            if (altitudeDropOk) {
-                deploymentTriggered = true;
-                
-                Serial.println("\n[DEPLOYMENT] ========================================");
-                Serial.print("[DEPLOYMENT] Freefall duration: ");
-                Serial.print(now - freefallStartMs);
-                Serial.println(" ms");
-                Serial.print("[DEPLOYMENT] Altitude drop: ");
-                Serial.print(altitudeDrop);
-                Serial.print(" m over ");
-                Serial.print(timeDelta / 1000.0);
-                Serial.println(" seconds");
-                Serial.print("[DEPLOYMENT] Drop rate: ");
-                Serial.print(altitudeDrop / (timeDelta / 1000.0));
-                Serial.println(" m/s");
-                Serial.print("[DEPLOYMENT] Final accel magnitude: ");
+        float altitudeDrop = oldestAltitude - newestAltitude;
+        uint32_t timeDelta = newestTime - oldestTime;
+        // bool altitudeDropOk = (altitudeDrop >= MIN_ALTITUDE_DROP_RATE) && (timeDelta >= 800);  // At least 800ms of data
+        bool altitudeDropOk = true;
+
+        if (accelMag < FREEFALL_ACCEL_THRESHOLD) {
+            if (freefallStartMs == 0) {
+                freefallStartMs = now;
+                Serial.println("[FREEFALL] Freefall detected, starting timer");
+                Serial.print("[FREEFALL] Accel magnitude: ");
                 Serial.print(accelMag);
                 Serial.println(" m/s²");
-                Serial.println("[DEPLOYMENT] TRIGGERING PARACHUTE DEPLOYMENT");
-                Serial.println("[DEPLOYMENT] ========================================\n");
+            }
+            
+            // Check BOTH freefall duration AND altitude drop rate
+            if (now - freefallStartMs >= FREEFALL_DURATION_MS) {
+                if (altitudeDropOk) {
+                    deploymentTriggered = true;
+                    
+                    Serial.println("\n[DEPLOYMENT] ========================================");
+                    Serial.print("[DEPLOYMENT] Freefall duration: ");
+                    Serial.print(now - freefallStartMs);
+                    Serial.println(" ms");
+                    Serial.print("[DEPLOYMENT] Altitude drop: ");
+                    Serial.print(altitudeDrop);
+                    Serial.print(" m over ");
+                    Serial.print(timeDelta / 1000.0);
+                    Serial.println(" seconds");
+                    Serial.print("[DEPLOYMENT] Drop rate: ");
+                    Serial.print(altitudeDrop / (timeDelta / 1000.0));
+                    Serial.println(" m/s");
+                    Serial.print("[DEPLOYMENT] Final accel magnitude: ");
+                    Serial.print(accelMag);
+                    Serial.println(" m/s²");
+                    Serial.println("[DEPLOYMENT] TRIGGERING PARACHUTE DEPLOYMENT");
+                    Serial.println("[DEPLOYMENT] ========================================\n");
 
-                actuator::trigger();
-                
-                Serial.println("ACTUATOR DEPLOYED");
-                Serial.print("[ACTUATOR] Deployed at system time: ");
-                Serial.print(getSystemTimeMs());
-                Serial.println(" ms");
-            } else {
-                Serial.print("[DEPLOY BLOCKED] Altitude drop insufficient: ");
-                Serial.print(altitudeDrop);
-                Serial.print(" m over ");
-                Serial.print(timeDelta / 1000.0);
-                Serial.print(" s (need ");
-                Serial.print(MIN_ALTITUDE_DROP_RATE);
-                Serial.println(" m in 1s window)");
-                freefallStartMs = 0; // Reset timer
+                    actuator::trigger();
+                    
+                    Serial.println("ACTUATOR DEPLOYED");
+                    Serial.print("[ACTUATOR] Deployed at system time: ");
+                    Serial.print(getSystemTimeMs());
+                    Serial.println(" ms");
+                } else {
+                    Serial.print("[DEPLOY BLOCKED] Altitude drop insufficient: ");
+                    Serial.print(altitudeDrop);
+                    Serial.print(" m over ");
+                    Serial.print(timeDelta / 1000.0);
+                    Serial.print(" s (need ");
+                    Serial.print(MIN_ALTITUDE_DROP_RATE);
+                    Serial.println(" m in 1s window)");
+                    freefallStartMs = 0; // Reset timer
+                }
+            }
+        } else {
+            // Not in freefall anymore - reset timer
+            if (freefallStartMs != 0) {
+                Serial.print("[FREEFALL] Ended after ");
+                Serial.print(now - freefallStartMs);
+                Serial.print(" ms (accel: ");
+                Serial.print(accelMag);
+                Serial.println(" m/s²)");
+                freefallStartMs = 0;
             }
         }
-    } else {
-        // Not in freefall anymore - reset timer
-        if (freefallStartMs != 0) {
-            Serial.print("[FREEFALL] Ended after ");
-            Serial.print(now - freefallStartMs);
-            Serial.print(" ms (accel: ");
-            Serial.print(accelMag);
-            Serial.println(" m/s²)");
-            freefallStartMs = 0;
-        }
     }
-}
 
-        // ---------------- DEBUG: Deployment conditions ----------------
-        static unsigned long lastCondPrint = 0;
-        // if (now - lastCondPrint > 500) {   // 2 Hz, readable
-        //     lastCondPrint = now;
+    // ---------------- DEBUG: Deployment conditions ----------------
+    static unsigned long lastCondPrint = 0;
+    // if (now - lastCondPrint > 500) {   // 2 Hz, readable
+    //     lastCondPrint = now;
 
-        //     Serial.print("DEPLOY CHECK | ");
+    //     Serial.print("DEPLOY CHECK | ");
 
-        //     Serial.print("FREEFALL_TIME=");
-        //     Serial.print((freefallStartMs > 0) ? (now - freefallStartMs) : 0);
-        //     Serial.print(" ms | ");
+    //     Serial.print("FREEFALL_TIME=");
+    //     Serial.print((freefallStartMs > 0) ? (now - freefallStartMs) : 0);
+    //     Serial.print(" ms | ");
 
-        //     Serial.print("DEPLOYED=");
-        //     Serial.print(deploymentTriggered ? "YES" : "NO");
+    //     Serial.print("DEPLOYED=");
+    //     Serial.print(deploymentTriggered ? "YES" : "NO");
 
-        //     Serial.println();
-        // }
-        // ---------------------------------------------------------
-    }
+    //     Serial.println();
+    // }
+    // ---------------------------------------------------------
 
     // FAST LoRa command polling (runs every loop)
     uint8_t cmd = 0;
@@ -986,7 +1059,7 @@ if (!deploymentTriggered) {
             s.pm2_5  = lastPmReading.valid ? lastPmReading.pm2_5  : -1;
             s.pm10_0 = lastPmReading.valid ? lastPmReading.pm10_0 : -1;
         }
-        debugPrintGnss(loc);
+        // debugPrintGnss(loc);
         flash_storeSample(s);
 
         // Touchdown detection (only after minimum descent time)
@@ -1094,7 +1167,7 @@ if (!deploymentTriggered) {
         Serial.println();
     }
 
-    mic::discardBuffer();
+    // mic::discardBuffer();
 }
 
 //TOUCHDOWN//
@@ -1200,6 +1273,111 @@ void handleTouchdown() {
         Serial.println();
     }
 }
+
+
+// //TOUCHDOWN//
+// void handleTouchdown() {
+//     static unsigned long lastPrint = 0;
+//     static bool dataCollectionActive = true;
+//     static bool touchdownEntryLogged = false;
+
+//     unsigned long now = millis();
+
+//     if (touchdownStartMs == 0) touchdownStartMs = now;
+
+//     if (!touchdownEntryLogged) {
+//         touchdownEntryLogged = true;
+//         flash_flushToSD();
+//         logEventSummary();
+//         Serial.println("[TOUCHDOWN] Event timeline logged once on entry");
+//     }
+
+//     gnss::update();
+
+//     // Read sensors needed for LoRa response
+//     bmp::Reading b = bmp::read();
+//     sensors_event_t accel, gyro, mag, temp;
+//     imu::read(accel, gyro, mag, temp);
+
+//     // PM only while collecting (avoid timeouts spam)
+//     /*
+//     pm::Reading pmr;
+//     if (dataCollectionActive) {
+//         pm::update();
+//         pmr = pm::read();
+//     } else {
+//         pmr.valid = false;
+//         pmr.pm10_0 = -1;
+//         pmr.pm2_5  = -1;
+//     }*/
+//     pm::Reading pmr;
+//     bool pmReady = false;
+//     pm::Reading newPmr;
+//     while (pm::poll(newPmr)) {            // will usually run 0 or 1 times
+//         pmr = newPmr;           // keep newest
+//         pmReady = true;
+//         Serial.println("Received PM value");
+//     }
+
+//     gnss::Location loc = getEnrichedLocation(b.altitude);
+
+//     Sample s;
+//     s.timestampMs = getUnifiedTimestamp(loc.timestamp);
+//     s.temperature = b.temperature;
+//     s.pressure    = b.pressure;
+//     s.altitude    = b.altitude;
+
+//     if (pmr.valid) {
+//         s.pm10_0 = pmr.pm10_0;
+//         s.pm2_5  = pmr.pm2_5;
+//     } else {
+//         s.pm10_0 = -1;
+//         s.pm2_5  = -1;
+//     }
+
+//     if (dataCollectionActive) {
+//         // flash_storeSample(s);
+//     }
+
+//     uint8_t cmdByte = 0;
+//     bool command = lora::receiveCommand(cmdByte);
+
+//     if (command) {
+//         uint8_t team = cmdByte & 0x0F;
+//         if (team != (TEAM_ID & 0x0F)) {
+//             Serial.print("[CMD] Not for us, team="); Serial.println(team);
+//             return;
+//         }
+
+//         Serial.print("[CMD] cmdByte=0x"); Serial.println(cmdByte, HEX);
+
+//         bool reqSci = (cmdByte & (1u << 4));
+//         bool reqTel = (cmdByte & (1u << 5));
+
+//         delay(60);
+
+//         if (reqTel) lora::sendTelemetry(loc, b.altitude);
+//         if (reqSci) lora::sendScience(s);
+
+//         lastCommandMs = now;
+//         flash_flushToSD();
+
+//         // STOP data collection after command received
+//         dataCollectionActive = false;
+
+//         // OPTIONAL: stop PM hardware to prevent any further reads/timeouts
+//         pm::stop();
+
+//         Serial.println("[TOUCHDOWN] Data collection stopped after command");
+//     }
+
+//     if (now - lastPrint > 1000) {
+//         lastPrint = now;
+//         Serial.print("[TOUCHDOWN] tick");
+//         if (!dataCollectionActive) Serial.print(" (data collection STOPPED)");
+//         Serial.println();
+//     }
+// }
 
 
     void loop() {                                           
